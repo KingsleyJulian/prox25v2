@@ -124,6 +124,15 @@ def reload_3proxy():
 def index():
     return render_template('index.html')
 
+def get_tailscale_ip():
+    out, _, _ = run(['ip', 'addr', 'show', 'tailscale0'])
+    m = re.search(r'inet (\d+\.\d+\.\d+\.\d+)', out)
+    return m.group(1) if m else None
+
+@app.route('/api/server-info')
+def api_server_info():
+    return jsonify({'tailscale_ip': get_tailscale_ip()})
+
 @app.route('/api/status')
 def api_status():
     live   = get_iface_status()

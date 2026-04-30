@@ -33,6 +33,16 @@
 
 <div class="container-fluid py-3 px-4" style="max-width:1400px;">
 
+  <!-- Tailscale reminder -->
+  <div id="tailscaleBanner" class="alert mb-3 d-flex align-items-center gap-2" style="background:#1c2128; border:1px solid #388bfd; color:#e6edf3; display:none!important;">
+    <i class="bi bi-shield-lock-fill text-primary fs-5"></i>
+    <div>
+      <strong>Tailscale Connection:</strong>
+      Use <code id="tailscaleIp" class="text-primary">loading...</code> as the <strong>Host</strong> in BitBrowser when connecting remotely via Tailscale.
+      <span class="text-muted small ms-2">— do not use the interface IPs (192.168.x.x) as host</span>
+    </div>
+  </div>
+
   <!-- Tabs -->
   <ul class="nav nav-tabs mb-3" id="mainTabs">
     <li class="nav-item"><a class="nav-link active" href="#" onclick="switchTab('interfaces',this)"><i class="bi bi-ethernet me-1"></i>Interfaces</a></li>
@@ -463,6 +473,16 @@ function copyStr(s) {
 // ── init ──
 loadStatus();
 setInterval(loadStatus, 15000);
+
+// Show Tailscale banner
+(async () => {
+  const res = await fetch('/api/server-info');
+  const info = await res.json();
+  if (info.tailscale_ip) {
+    document.getElementById('tailscaleIp').textContent = info.tailscale_ip;
+    document.getElementById('tailscaleBanner').style.display = 'flex';
+  }
+})();
 </script>
 </body>
 </html>
