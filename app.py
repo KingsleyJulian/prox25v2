@@ -107,9 +107,9 @@ def write_3proxy(proxies):
     for p in proxies:
         lines += [
             f"# {p['interface']} | {p['username']}",
+            'flush',
             f"allow {p['username']}",
             f"socks -p{p['port']} -i0.0.0.0 -e{p['exit_ip']} -a",
-            'deny *',
             '',
         ]
     os.makedirs(os.path.dirname(PROXY3_CFG), exist_ok=True)
