@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ProxyManager</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
+  <style>
+    body { background:#0d1117; }
+    .card { background:#161b22; border-color:#30363d; }
+    .nav-tabs .nav-link.active { background:#161b22; border-color:#30363d #30363d #161b22; color:#fff; }
+    .nav-tabs .nav-link { color:#8b949e; border-color:transparent; }
+    .nav-tabs { border-color:#30363d; }
+    .table { --bs-table-bg:#161b22; --bs-table-hover-bg:#1c2128; }
+    th { color:#8b949e; font-weight:500; font-size:.8rem; text-transform:uppercase; letter-spacing:.05em; }
+    .iface-card { transition:.15s; cursor:default; }
+    .iface-card:hover { border-color:#58a6ff !important; }
+    .dot { width:9px; height:9px; border-radius:50%; display:inline-block; flex-shrink:0; }
+    .form-control, .form-select { background:#0d1117 !important; border-color:#30363d !important; color:#e6edf3 !important; }
+    .form-control:focus, .form-select:focus { border-color:#58a6ff !important; box-shadow:0 0 0 .2rem rgba(88,166,255,.15) !important; }
+    code { color:#79c0ff; }
+    .badge-iface { font-size:.7rem; font-weight:600; }
+    #toast-container { position:fixed; bottom:1.5rem; right:1.5rem; z-index:9999; }
+  </style>
+</head>
+<body>
+
+<nav class="navbar px-3" style="background:#161b22; border-bottom:1px solid #30363d; height:54px;">
+  <span class="fw-bold text-white"><i class="bi bi-hdd-network-fill text-primary me-2"></i>ProxyManager</span>
+  <span class="text-muted small"><i class="bi bi-circle-fill text-success me-1" style="font-size:.5rem;"></i>phserver1</span>
+</nav>
+
+<div class="container-fluid py-3 px-4" style="max-width:1400px;">
+
+  <!-- Tabs -->
+  <ul class="nav nav-tabs mb-3" id="mainTabs">
+    <li class="nav-item"><a class="nav-link active" href="#" onclick="switchTab('interfaces',this)"><i class="bi bi-ethernet me-1"></i>Interfaces</a></li>
+    <li class="nav-item"><a class="nav-link" href="#" onclick="switchTab('proxies',this)"><i class="bi bi-shield-lock me-1"></i>Proxy Accounts</a></li>
+  </ul>
+
+  <!-- ── INTERFACES TAB ── -->
+  <div id="tab-interfaces">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <span class="text-muted small">Configure each ISP port, then add proxy accounts to it.</span>
+      <button class="btn btn-sm btn-outline-secondary" onclick="loadStatus()"><i class="bi bi-arrow-clockwise me-1"></i>Refresh</button>
+    </div>
+    <div id="ifaceGrid" class="row g-3"></div>
+  </div>
+
+  <!-- ── PROXIES TAB ── -->
+  <div id="tab-proxies" class="d-none">
+    <div class="d-flex gap-2 mb-3 flex-wrap">
+      <select class="form-select form-select-sm w-auto" id="filterIface" onchange="loadProxies()">
+        <option value="">All interfaces</option>
+        <option>enp5s0</option><option>enp6s0</option><option>enp7s0</option>
+        <option>enp8s0</option><option>enp9s0</option><option>enp10s0</option>
+      </select>
+      <button class="btn btn-sm btn-primary" onclick="openAddProxy()"><i class="bi bi-plus-lg me-1"></i>Add Account</button>
+      <button class="btn btn-sm btn-outline-primary" onclick="openBulkAdd()"><i class="bi bi-stack me-1"></i>Bulk Add</button>
+      <div class="ms-auto d-flex gap-2">
+        <select class="form-select form-select-sm w-auto" id="exportFmt">
+          <option value="host:port:user:pass">ip:port:user:pass</option>
+          <option value="socks5">socks5://user:pass@ip:port</option>
+        </select>
+        <button class="btn btn-sm btn-outline-secondary" onclick="exportProxies()"><i class="bi bi-download me-1"></i>Export</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-body p-0">
+        <table class="table table-hover mb-0" id="proxyTable">
+          <thead><tr>
+            <th class="ps-3">Interface</th>
+            <th>Exit IP</th>
+            <th>Port</th>
+            <th>Username</th>
+            <th>Password</th>
+            <th>Connection String</th>
+            <th></th>
+          </tr></thead>
+          <tbody id="proxyBody">
+            <tr><td colspan="7" class="text-center text-muted py-4">No proxy accounts yet</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div id="proxyCount" class="text-muted small mt-2"></div>
+  </div>
+</div>
+
+<!-- ── INTERFACE SETUP MODAL ── -->
+<div class="modal fade" id="ifaceModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content" style="background:#161b22; border-color:#30363d;">
+      <div class="modal-header" style="border-color:#30363d;">
+        <h6 class="modal-title">Configure <span id="ifaceModalName" class="text-primary"></span></h6>
+        <button class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="ifaceModalIface">
+        <div class="mb-3">
+          <label class="form-label small">Static IP Address</label>
+          <input type="text" class="form-control" id="ifaceIp" placeholder="e.g. 192.168.8.100">
+        </div>
+        <div class="row mb-3">
+          <div class="col-4">
+            <label class="form-label small">Prefix</label>
+            <input type="number" class="form-control" id="ifacePrefix" value="24" min="1" max="32">
+          </div>
+          <div class="col-8">
+            <label class="form-label small">Gateway</label>
+            <input type="text" class="form-control" id="ifaceGw" placeholder="e.g. 192.168.8.1">
+          </div>
+        </div>
+        <div id="ifaceAlert" class="d-none"></div>
+      </div>
+      <div class="modal-footer" style="border-color:#30363d;">
+        <button class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button class="btn btn-sm btn-primary" onclick="submitIfaceSetup()">
+          <span id="ifaceSpinner" class="spinner-border spinner-border-sm me-1 d-none"></span>Apply
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── ADD PROXY MODAL ── -->
+<div class="modal fade" id="addProxyModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content" style="background:#161b22; border-color:#30363d;">
+      <div class="modal-header" style="border-color:#30363d;">
+        <h6 class="modal-title">Add Proxy Account</h6>
+        <button class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-3">
+          <label class="form-label small">Interface (Exit IP)</label>
+          <select class="form-select" id="addIface"></select>
+        </div>
+        <div class="mb-2 p-2 rounded" style="background:#0d1117; border:1px solid #30363d;">
+          <small class="text-muted">Leave username/password blank to auto-generate</small>
+        </div>
+        <div class="row mt-3">
+          <div class="col">
+            <label class="form-label small">Username</label>
+            <input type="text" class="form-control" id="addUser" placeholder="auto-generate">
+          </div>
+          <div class="col">
+            <label class="form-label small">Password</label>
+            <input type="text" class="form-control" id="addPass" placeholder="auto-generate">
+          </div>
+        </div>
+        <div id="addAlert" class="mt-3 d-none"></div>
+      </div>
+      <div class="modal-footer" style="border-color:#30363d;">
+        <button class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button class="btn btn-sm btn-primary" onclick="submitAddProxy()">
+          <span id="addSpinner" class="spinner-border spinner-border-sm me-1 d-none"></span>Create
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── BULK ADD MODAL ── -->
+<div class="modal fade" id="bulkModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content" style="background:#161b22; border-color:#30363d;">
+      <div class="modal-header" style="border-color:#30363d;">
+        <h6 class="modal-title">Bulk Create Proxy Accounts</h6>
+        <button class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-3">
+          <label class="form-label small">Interface (Exit IP)</label>
+          <select class="form-select" id="bulkIface"></select>
+        </div>
+        <div class="mb-3">
+          <label class="form-label small">Number of accounts</label>
+          <input type="number" class="form-control" id="bulkCount" value="5" min="1" max="100">
+        </div>
+        <div id="bulkPreview" class="p-2 rounded small text-muted" style="background:#0d1117; border:1px solid #30363d; min-height:40px;">
+          Will create <span id="bulkCountLabel">5</span> accounts with auto-generated credentials.
+        </div>
+        <div id="bulkAlert" class="mt-3 d-none"></div>
+      </div>
+      <div class="modal-footer" style="border-color:#30363d;">
+        <button class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button class="btn btn-sm btn-primary" onclick="submitBulk()">
+          <span id="bulkSpinner" class="spinner-border spinner-border-sm me-1 d-none"></span>Create All
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Toast container -->
+<div id="toast-container"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+// ── state ──
+let ifaceData = {};
+
+// ── tab switching ──
+function switchTab(name, el) {
+  document.querySelectorAll('[id^="tab-"]').forEach(t => t.classList.add('d-none'));
+  document.getElementById('tab-' + name).classList.remove('d-none');
+  document.querySelectorAll('.nav-link').forEach(l => l.classList.remove('active'));
+  el.classList.add('active');
+  if (name === 'proxies') loadProxies();
+  return false;
+}
+
+// ── toast ──
+function toast(msg, type='success') {
+  const id = 'toast' + Date.now();
+  const el = document.createElement('div');
+  el.className = `toast align-items-center text-bg-${type} border-0 mb-2 show`;
+  el.id = id;
+  el.innerHTML = `<div class="d-flex"><div class="toast-body">${msg}</div><button class="btn-close btn-close-white me-2 m-auto" onclick="document.getElementById('${id}').remove()"></button></div>`;
+  document.getElementById('toast-container').appendChild(el);
+  setTimeout(() => el.remove(), 3500);
+}
+
+// ── load interface status ──
+async function loadStatus() {
+  const res = await fetch('/api/status');
+  ifaceData = await res.json();
+  renderIfaces(ifaceData);
+}
+
+function renderIfaces(data) {
+  const grid = document.getElementById('ifaceGrid');
+  grid.innerHTML = '';
+  ['enp5s0','enp6s0','enp7s0','enp8s0','enp9s0','enp10s0'].forEach(iface => {
+    const d = data[iface] || {};
+    const connected  = d.connected;
+    const configured = d.configured;
+    const count      = d.proxy_count || 0;
+    const ip         = d.cfg?.ip || d.ip || null;
+
+    let dotColor = !connected ? '#6e7681' : !configured ? '#d29922' : '#3fb950';
+    let badge    = !connected ? 'secondary' : !configured ? 'warning' : 'success';
+    let status   = !connected ? 'No Carrier' : !configured ? 'Not Configured' : 'Active';
+
+    grid.innerHTML += `
+      <div class="col-xl-4 col-md-6">
+        <div class="card iface-card h-100">
+          <div class="card-body">
+            <div class="d-flex justify-content-between align-items-start mb-2">
+              <div class="d-flex align-items-center gap-2">
+                <span class="dot" style="background:${dotColor}; margin-top:2px;"></span>
+                <h6 class="mb-0 text-white">${iface}</h6>
+              </div>
+              <span class="badge bg-${badge} badge-iface">${status}</span>
+            </div>
+            <div class="small text-muted mb-1"><i class="bi bi-ethernet me-1"></i>${ip ? ip + '/' + (d.cfg?.prefix || d.prefix || 24) : '—'}</div>
+            <div class="small text-muted mb-1"><i class="bi bi-arrow-right me-1"></i>GW: ${d.cfg?.gateway || '—'}</div>
+            <div class="small mb-3"><i class="bi bi-shield-lock me-1 text-primary"></i><span class="text-white">${count}</span> <span class="text-muted">proxy account${count !== 1 ? 's' : ''}</span></div>
+            <div class="d-flex gap-2">
+              <button class="btn btn-sm btn-primary flex-fill" onclick="openIfaceModal('${iface}')">
+                <i class="bi bi-gear me-1"></i>${configured ? 'Edit' : 'Configure'}
+              </button>
+              ${configured ? `<button class="btn btn-sm btn-outline-primary" onclick="quickAddProxy('${iface}')"><i class="bi bi-plus-lg"></i></button>` : ''}
+              ${configured ? `<button class="btn btn-sm btn-outline-danger" onclick="removeIface('${iface}')"><i class="bi bi-trash"></i></button>` : ''}
+            </div>
+          </div>
+        </div>
+      </div>`;
+  });
+}
+
+// ── interface modal ──
+function openIfaceModal(iface) {
+  const d = ifaceData[iface] || {};
+  document.getElementById('ifaceModalIface').value = iface;
+  document.getElementById('ifaceModalName').textContent = iface;
+  document.getElementById('ifaceIp').value     = d.cfg?.ip || d.ip || '';
+  document.getElementById('ifacePrefix').value = d.cfg?.prefix || 24;
+  document.getElementById('ifaceGw').value     = d.cfg?.gateway || '';
+  document.getElementById('ifaceAlert').className = 'd-none';
+  new bootstrap.Modal(document.getElementById('ifaceModal')).show();
+}
+
+async function submitIfaceSetup() {
+  const sp = document.getElementById('ifaceSpinner');
+  sp.classList.remove('d-none');
+  const res = await fetch('/api/interface/setup', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({
+      interface: document.getElementById('ifaceModalIface').value,
+      ip:        document.getElementById('ifaceIp').value,
+      prefix:    document.getElementById('ifacePrefix').value,
+      gateway:   document.getElementById('ifaceGw').value,
+    })
+  });
+  sp.classList.add('d-none');
+  const r = await res.json();
+  if (r.success) {
+    bootstrap.Modal.getInstance(document.getElementById('ifaceModal')).hide();
+    toast('Interface configured!');
+    loadStatus();
+  } else {
+    const al = document.getElementById('ifaceAlert');
+    al.className = 'alert alert-danger small p-2';
+    al.textContent = r.errors?.join('; ') || 'Failed';
+  }
+}
+
+async function removeIface(iface) {
+  if (!confirm(`Remove configuration for ${iface}?`)) return;
+  await fetch(`/api/interface/${iface}`, {method:'DELETE'});
+  toast(`${iface} removed`, 'warning');
+  loadStatus();
+}
+
+// ── proxy list ──
+async function loadProxies() {
+  const iface = document.getElementById('filterIface').value;
+  const url   = '/api/proxies' + (iface ? '?interface=' + iface : '');
+  const res   = await fetch(url);
+  const list  = await res.json();
+  renderProxies(list);
+}
+
+function renderProxies(list) {
+  const tbody = document.getElementById('proxyBody');
+  document.getElementById('proxyCount').textContent = list.length ? `${list.length} account${list.length !== 1 ? 's' : ''}` : '';
+  if (!list.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4">No proxy accounts yet</td></tr>';
+    return;
+  }
+  tbody.innerHTML = list.map(p => {
+    const conn = `${p.exit_ip}:${p.port}:${p.username}:${p.password}`;
+    return `<tr>
+      <td class="ps-3"><code class="small">${p.interface}</code></td>
+      <td><code class="small">${p.exit_ip}</code></td>
+      <td><code>${p.port}</code></td>
+      <td><code>${p.username}</code></td>
+      <td><code>${p.password}</code></td>
+      <td>
+        <code class="small text-muted">${conn}</code>
+        <i class="bi bi-clipboard ms-2" style="cursor:pointer;color:#58a6ff;" onclick="copyStr('${conn}')" title="Copy"></i>
+      </td>
+      <td><button class="btn btn-sm btn-outline-danger py-0" onclick="deleteProxy('${p.id}')"><i class="bi bi-trash"></i></button></td>
+    </tr>`;
+  }).join('');
+}
+
+// ── add proxy ──
+function openAddProxy(preselect) {
+  populateIfaceSelects();
+  if (preselect) document.getElementById('addIface').value = preselect;
+  document.getElementById('addUser').value = '';
+  document.getElementById('addPass').value = '';
+  document.getElementById('addAlert').className = 'd-none';
+  new bootstrap.Modal(document.getElementById('addProxyModal')).show();
+}
+
+function quickAddProxy(iface) {
+  switchTab('proxies', document.querySelectorAll('.nav-link')[1]);
+  openAddProxy(iface);
+}
+
+async function submitAddProxy() {
+  const sp = document.getElementById('addSpinner');
+  sp.classList.remove('d-none');
+  const res = await fetch('/api/proxies', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({
+      interface: document.getElementById('addIface').value,
+      username:  document.getElementById('addUser').value,
+      password:  document.getElementById('addPass').value,
+    })
+  });
+  sp.classList.add('d-none');
+  const r = await res.json();
+  if (r.success) {
+    bootstrap.Modal.getInstance(document.getElementById('addProxyModal')).hide();
+    toast('Proxy account created!');
+    loadProxies();
+  } else {
+    const al = document.getElementById('addAlert');
+    al.className = 'alert alert-danger small p-2';
+    al.textContent = r.error || 'Failed';
+  }
+}
+
+// ── bulk add ──
+function openBulkAdd() {
+  populateIfaceSelects();
+  document.getElementById('bulkCount').value = 5;
+  document.getElementById('bulkCountLabel').textContent = 5;
+  document.getElementById('bulkAlert').className = 'd-none';
+  new bootstrap.Modal(document.getElementById('bulkModal')).show();
+}
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('bulkCount').addEventListener('input', function() {
+    document.getElementById('bulkCountLabel').textContent = this.value;
+  });
+});
+
+async function submitBulk() {
+  const sp = document.getElementById('bulkSpinner');
+  sp.classList.remove('d-none');
+  const res = await fetch('/api/proxies/bulk', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({
+      interface: document.getElementById('bulkIface').value,
+      count:     document.getElementById('bulkCount').value,
+    })
+  });
+  sp.classList.add('d-none');
+  const r = await res.json();
+  if (r.success) {
+    bootstrap.Modal.getInstance(document.getElementById('bulkModal')).hide();
+    toast(`${r.created} accounts created!`);
+    loadProxies();
+  } else {
+    const al = document.getElementById('bulkAlert');
+    al.className = 'alert alert-danger small p-2';
+    al.textContent = r.error || 'Failed';
+  }
+}
+
+// ── delete proxy ──
+async function deleteProxy(id) {
+  if (!confirm('Delete this proxy account?')) return;
+  await fetch('/api/proxies/' + id, {method:'DELETE'});
+  toast('Deleted', 'warning');
+  loadProxies();
+}
+
+// ── export ──
+function exportProxies() {
+  const iface = document.getElementById('filterIface').value;
+  const fmt   = document.getElementById('exportFmt').value;
+  let url = `/api/proxies/export?format=${encodeURIComponent(fmt)}`;
+  if (iface) url += `&interface=${iface}`;
+  window.location = url;
+}
+
+// ── helpers ──
+function populateIfaceSelects() {
+  const configured = Object.entries(ifaceData)
+    .filter(([, d]) => d.configured)
+    .map(([iface, d]) => `<option value="${iface}">${iface} — ${d.cfg?.ip || '?'}</option>`)
+    .join('');
+  ['addIface','bulkIface'].forEach(id => {
+    document.getElementById(id).innerHTML = configured || '<option disabled>No interfaces configured yet</option>';
+  });
+}
+
+function copyStr(s) {
+  navigator.clipboard.writeText(s);
+  toast('Copied!');
+}
+
+// ── init ──
+loadStatus();
+setInterval(loadStatus, 15000);
+</script>
+</body>
+</html>
