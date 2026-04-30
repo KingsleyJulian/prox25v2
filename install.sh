@@ -38,13 +38,14 @@ cp "$SCRIPT_DIR/templates/index.html" /opt/proxymanager/templates/
 cat > /etc/systemd/system/proxymanager.service << 'EOF'
 [Unit]
 Description=ProxyManager Web UI
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
 User=root
 WorkingDirectory=/opt/proxymanager
-ExecStart=/usr/bin/python3 /opt/proxymanager/app.py
+ExecStart=/opt/proxymanager/venv/bin/python3 /opt/proxymanager/app.py
 Restart=always
 RestartSec=5
 

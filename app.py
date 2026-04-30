@@ -268,8 +268,10 @@ def export_proxies():
                     headers={'Content-Disposition': 'attachment; filename=proxies.txt'})
 
 if __name__ == '__main__':
-    # On startup, regenerate 3proxy config from saved state and reload
+    # On startup: restore policy routing + regenerate 3proxy config
     _cfg = load_cfg()
+    for _iface, _icfg in _cfg.get('interfaces', {}).items():
+        apply_policy_routing(_iface, _icfg['ip'], _icfg['gateway'])
     if _cfg.get('proxies'):
         write_3proxy(_cfg['proxies'])
         reload_3proxy()
