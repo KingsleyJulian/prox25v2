@@ -3,11 +3,25 @@ set -e
 
 echo "=== ProxyManager Installer ==="
 
-# Dependencies
-apt-get update -qq
-apt-get install -y python3 python3-pip 3proxy
+# Fix any broken apt repos silently
+apt-get update -qq 2>/dev/null || apt-get update --fix-missing -qq || true
 
+# Python deps
+apt-get install -y python3 python3-pip build-essential git
 pip3 install flask pyyaml
+
+# Build 3proxy from source (not in Ubuntu 24.04 repos)
+if ! command -v 3proxy &>/dev/null; then
+  echo "--- Building 3proxy from source ---"
+  cd /tmp
+  rm -rf 3proxy-src
+  git clone --depth=1 https://github.com/3proxy/3proxy.git 3proxy-src
+  cd 3proxy-src
+  make -f Makefile.Linux
+  make -f Makefile.Linux install
+  cd -
+  echo "--- 3proxy built and installed ---"
+fi
 
 # Directories
 mkdir -p /opt/proxymanager/templates
@@ -15,9 +29,10 @@ mkdir -p /etc/proxymanager
 mkdir -p /etc/3proxy
 mkdir -p /var/log/3proxy
 
-# Copy app files
-cp app.py /opt/proxymanager/
-cp templates/index.html /opt/proxymanager/templates/
+# Copy app files (support running from any directory)
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cp "$SCRIPT_DIR/app.py" /opt/proxymanager/
+cp "$SCRIPT_DIR/templates/index.html" /opt/proxymanager/templates/
 
 # Systemd service for ProxyManager web UI
 cat > /etc/systemd/system/proxymanager.service << 'EOF'
@@ -46,7 +61,7 @@ After=network.target
 [Service]
 Type=simple
 User=root
-ExecStart=/usr/bin/3proxy /etc/3proxy/3proxy.cfg
+ExecStart=/usr/local/bin/3proxy /etc/3proxy/3proxy.cfg
 Restart=always
 RestartSec=5
 
@@ -66,7 +81,9 @@ systemctl enable proxymanager 3proxy
 systemctl start proxymanager 3proxy
 
 SERVER_IP=$(hostname -I | awk '{print $1}')
+TAILSCALE_IP=$(ip addr show tailscale0 2>/dev/null | grep -oP '(?<=inet )\d+\.\d+\.\d+\.\d+' || echo "")
+
 echo ""
 echo "=== Done! ==="
 echo "ProxyManager: http://${SERVER_IP}:8080"
-echo "Also accessible via Tailscale: http://100.70.185.66:8080"
+[ -n "$TAILSCALE_IP" ] && echo "Via Tailscale:  http://${TAILSCALE_IP}:8080"
