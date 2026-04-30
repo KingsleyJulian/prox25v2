@@ -260,4 +260,9 @@ def export_proxies():
                     headers={'Content-Disposition': 'attachment; filename=proxies.txt'})
 
 if __name__ == '__main__':
+    # On startup, regenerate 3proxy config from saved state and reload
+    _cfg = load_cfg()
+    if _cfg.get('proxies'):
+        write_3proxy(_cfg['proxies'])
+        reload_3proxy()
     app.run(host='0.0.0.0', port=8080, debug=False)
