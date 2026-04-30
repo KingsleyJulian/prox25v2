@@ -107,8 +107,7 @@ def write_3proxy(proxies):
     for p in proxies:
         lines += [
             f"# {p['interface']} | {p['username']}",
-            'flush',
-            f"allow {p['username']}",
+            'allow *',
             f"socks -p{p['port']} -i0.0.0.0 -e{p['exit_ip']} -a",
             '',
         ]
