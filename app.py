@@ -316,7 +316,10 @@ def export_proxies():
                     headers={'Content-Disposition': 'attachment; filename=proxies.txt'})
 
 if __name__ == '__main__':
-    # On startup: restore policy routing + regenerate 3proxy config
+    # On startup: bring every physical NIC up (safety net for the udev rule),
+    # then restore policy routing + regenerate 3proxy config
+    for _iface in list_nics():
+        run(['ip', 'link', 'set', _iface, 'up'])
     _cfg = load_cfg()
     for _iface, _icfg in _cfg.get('interfaces', {}).items():
         _t = _icfg.get('table_id') or get_or_assign_tid(_iface, _cfg)

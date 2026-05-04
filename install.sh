@@ -77,6 +77,17 @@ nscache 65536
 auth strong
 EOF
 
+# udev rule: auto-bring-up any physical ethernet NIC on add events
+# Covers boot enumeration AND USB-ethernet hotplug. KERNEL=="en*" matches
+# enp*/eno*/enx* but skips lo, tailscale0, docker0, bridges, veth, wg, tun.
+cat > /etc/udev/rules.d/99-proxymanager-link-up.rules << 'EOF'
+SUBSYSTEM=="net", ACTION=="add", KERNEL=="en*", RUN+="/usr/sbin/ip link set %k up"
+EOF
+
+udevadm control --reload-rules
+# Trigger the rule for already-present devices (so existing DOWN NICs come up now)
+udevadm trigger --subsystem-match=net --action=add
+
 systemctl daemon-reload
 systemctl enable proxymanager 3proxy
 systemctl start proxymanager 3proxy
