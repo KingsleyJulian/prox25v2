@@ -10,8 +10,9 @@ NETPLAN_FILE  = '/etc/netplan/01-netcfg.yaml'
 PROXY3_CFG    = '/etc/3proxy/3proxy.cfg'
 RT_TABLES     = '/etc/iproute2/rt_tables'
 
-MANAGED = ['enp5s0','enp6s0','enp7s0','enp8s0','enp9s0','enp10s0']
-TABLE_BASE = 101  # enp5s0=101 ... enp10s0=106
+SYS_NET       = '/sys/class/net'
+TABLE_MIN     = 101
+TABLE_MAX     = 249
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -19,8 +20,42 @@ def run(cmd):
     r = subprocess.run(cmd, capture_output=True, text=True)
     return r.stdout.strip(), r.stderr.strip(), r.returncode
 
-def tid(iface):
-    return TABLE_BASE + MANAGED.index(iface)
+def list_nics():
+    """Physical ethernet interfaces — anything in /sys/class/net with a backing device."""
+    try:
+        return sorted(
+            i for i in os.listdir(SYS_NET)
+            if os.path.exists(f'{SYS_NET}/{i}/device')
+        )
+    except FileNotFoundError:
+        return []
+
+def get_or_assign_tid(iface, cfg):
+    table_ids = cfg.setdefault('table_ids', {})
+    if iface in table_ids:
+        return table_ids[iface]
+    used = set(table_ids.values())
+    for candidate in range(TABLE_MIN, TABLE_MAX + 1):
+        if candidate not in used:
+            table_ids[iface] = candidate
+            return candidate
+    raise RuntimeError('No free routing table IDs')
+
+def get_uplink_iface():
+    """The iface currently holding the main-table default route (Tailscale relies on it)."""
+    out, _, _ = run(['ip', 'route', 'show', 'default'])
+    m = re.search(r'default\s+via\s+\S+\s+dev\s+(\S+)', out)
+    return m.group(1) if m else None
+
+def get_default_gateways():
+    """iface -> default gateway IP (main table)."""
+    out, _, _ = run(['ip', 'route', 'show', 'default'])
+    gws = {}
+    for line in out.splitlines():
+        m = re.match(r'default\s+via\s+(\S+)\s+dev\s+(\S+)', line)
+        if m:
+            gws[m.group(2)] = m.group(1)
+    return gws
 
 def rand_pass(n=12):
     chars = string.ascii_letters + string.digits
@@ -38,8 +73,9 @@ def save_cfg(cfg):
         json.dump(cfg, f, indent=2)
 
 def get_iface_status():
+    nics = list_nics()
     out, _, _ = run(['ip', 'addr', 'show'])
-    result = {i: {'name': i, 'connected': False, 'ip': None, 'prefix': None} for i in MANAGED}
+    result = {i: {'name': i, 'connected': False, 'ip': None, 'prefix': None} for i in nics}
     cur = None
     for line in out.splitlines():
         m = re.match(r'^\d+: (\S+?)[@:]', line)
@@ -52,14 +88,16 @@ def get_iface_status():
             if ip_m:
                 result[cur]['ip']     = ip_m.group(1)
                 result[cur]['prefix'] = ip_m.group(2)
+    gws = get_default_gateways()
+    for iface, data in result.items():
+        data['gateway'] = gws.get(iface)
     return result
 
 # ── netplan + routing ─────────────────────────────────────────────────────────
 
-def update_netplan(iface, ip, prefix, gateway):
+def update_netplan(iface, ip, prefix, gateway, t):
     with open(NETPLAN_FILE) as f:
         cfg = yaml.safe_load(f)
-    t = tid(iface)
     net = str(ipaddress.IPv4Network(f'{ip}/{prefix}', strict=False))
     cfg['network']['ethernets'][iface] = {
         'addresses': [f'{ip}/{prefix}'],
@@ -75,8 +113,7 @@ def update_netplan(iface, ip, prefix, gateway):
     _, err, rc = run(['netplan', 'apply'])
     return rc == 0, err
 
-def apply_policy_routing(iface, ip, gateway):
-    t = tid(iface)
+def apply_policy_routing(iface, ip, gateway, t):
     tname = f'isp_{iface}'
     with open(RT_TABLES) as f:
         content = f.read()
@@ -137,6 +174,7 @@ def api_server_info():
 def api_status():
     live   = get_iface_status()
     cfg    = load_cfg()
+    uplink = get_uplink_iface()
     counts = {}
     for p in cfg['proxies']:
         counts[p['interface']] = counts.get(p['interface'], 0) + 1
@@ -144,6 +182,7 @@ def api_status():
         data['configured'] = iface in cfg['interfaces']
         data['cfg']        = cfg['interfaces'].get(iface)
         data['proxy_count']= counts.get(iface, 0)
+        data['is_uplink']  = (iface == uplink)
     return jsonify(live)
 
 @app.route('/api/interface/setup', methods=['POST'])
@@ -153,15 +192,24 @@ def iface_setup():
     ip     = d['ip']
     prefix = str(d['prefix'])
     gw     = d['gateway']
-    if iface not in MANAGED:
-        return jsonify({'success': False, 'error': 'Invalid interface'}), 400
-    errors = []
-    ok, err = update_netplan(iface, ip, prefix, gw)
-    if not ok:
-        errors.append(f'netplan: {err}')
-    apply_policy_routing(iface, ip, gw)
-    cfg = load_cfg()
-    cfg['interfaces'][iface] = {'ip': ip, 'prefix': int(prefix), 'gateway': gw, 'table_id': tid(iface)}
+    if iface not in list_nics():
+        return jsonify({'success': False, 'error': 'Unknown interface'}), 400
+    cfg     = load_cfg()
+    t       = get_or_assign_tid(iface, cfg)
+    uplink  = (iface == get_uplink_iface())
+    errors  = []
+    # Skip netplan rewrite for the uplink — its config is owned by whatever
+    # currently provides the default route (DHCP / existing static), and we
+    # don't want to risk dropping Tailscale's path.
+    if not uplink:
+        ok, err = update_netplan(iface, ip, prefix, gw, t)
+        if not ok:
+            errors.append(f'netplan: {err}')
+    apply_policy_routing(iface, ip, gw, t)
+    cfg['interfaces'][iface] = {
+        'ip': ip, 'prefix': int(prefix), 'gateway': gw,
+        'table_id': t, 'is_uplink': uplink,
+    }
     # update exit_ip on existing proxies for this interface
     for p in cfg['proxies']:
         if p['interface'] == iface:
@@ -271,7 +319,9 @@ if __name__ == '__main__':
     # On startup: restore policy routing + regenerate 3proxy config
     _cfg = load_cfg()
     for _iface, _icfg in _cfg.get('interfaces', {}).items():
-        apply_policy_routing(_iface, _icfg['ip'], _icfg['gateway'])
+        _t = _icfg.get('table_id') or get_or_assign_tid(_iface, _cfg)
+        apply_policy_routing(_iface, _icfg['ip'], _icfg['gateway'], _t)
+    save_cfg(_cfg)
     if _cfg.get('proxies'):
         write_3proxy(_cfg['proxies'])
         reload_3proxy()

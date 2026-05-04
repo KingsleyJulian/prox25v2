@@ -63,8 +63,6 @@
     <div class="d-flex gap-2 mb-3 flex-wrap">
       <select class="form-select form-select-sm w-auto" id="filterIface" onchange="loadProxies()">
         <option value="">All interfaces</option>
-        <option>enp5s0</option><option>enp6s0</option><option>enp7s0</option>
-        <option>enp8s0</option><option>enp9s0</option><option>enp10s0</option>
       </select>
       <button class="btn btn-sm btn-primary" onclick="openAddProxy()"><i class="bi bi-plus-lg me-1"></i>Add Account</button>
       <button class="btn btn-sm btn-outline-primary" onclick="openBulkAdd()"><i class="bi bi-stack me-1"></i>Bulk Add</button>
@@ -243,10 +241,23 @@ async function loadStatus() {
 function renderIfaces(data) {
   const grid = document.getElementById('ifaceGrid');
   grid.innerHTML = '';
-  ['enp5s0','enp6s0','enp7s0','enp8s0','enp9s0','enp10s0'].forEach(iface => {
+  const ifaces = Object.keys(data).sort();
+  if (!ifaces.length) {
+    grid.innerHTML = '<div class="col-12 text-muted text-center py-4">No physical interfaces detected</div>';
+    return;
+  }
+  // Refresh filter dropdown to match detected ifaces
+  const filterSel = document.getElementById('filterIface');
+  const cur = filterSel.value;
+  filterSel.innerHTML = '<option value="">All interfaces</option>' +
+    ifaces.map(i => `<option value="${i}">${i}</option>`).join('');
+  filterSel.value = cur;
+
+  ifaces.forEach(iface => {
     const d = data[iface] || {};
     const connected  = d.connected;
     const configured = d.configured;
+    const isUplink   = d.is_uplink;
     const count      = d.proxy_count || 0;
     const ip         = d.cfg?.ip || d.ip || null;
 
@@ -262,6 +273,7 @@ function renderIfaces(data) {
               <div class="d-flex align-items-center gap-2">
                 <span class="dot" style="background:${dotColor}; margin-top:2px;"></span>
                 <h6 class="mb-0 text-white">${iface}</h6>
+                ${isUplink ? '<span class="badge bg-info badge-iface" title="Holds the main default route — Tailscale uses this">Uplink</span>' : ''}
               </div>
               <span class="badge bg-${badge} badge-iface">${status}</span>
             </div>
@@ -287,9 +299,15 @@ function openIfaceModal(iface) {
   document.getElementById('ifaceModalIface').value = iface;
   document.getElementById('ifaceModalName').textContent = iface;
   document.getElementById('ifaceIp').value     = d.cfg?.ip || d.ip || '';
-  document.getElementById('ifacePrefix').value = d.cfg?.prefix || 24;
-  document.getElementById('ifaceGw').value     = d.cfg?.gateway || '';
-  document.getElementById('ifaceAlert').className = 'd-none';
+  document.getElementById('ifacePrefix').value = d.cfg?.prefix || d.prefix || 24;
+  document.getElementById('ifaceGw').value     = d.cfg?.gateway || d.gateway || '';
+  const al = document.getElementById('ifaceAlert');
+  if (d.is_uplink) {
+    al.className = 'alert alert-info small p-2';
+    al.innerHTML = '<i class="bi bi-info-circle me-1"></i><strong>Uplink interface:</strong> netplan will not be modified. Only policy-routing rules will be added so this NIC can act as a proxy exit while Tailscale keeps using its default route.';
+  } else {
+    al.className = 'd-none';
+  }
   new bootstrap.Modal(document.getElementById('ifaceModal')).show();
 }
 
