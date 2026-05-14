@@ -93,6 +93,50 @@ def get_iface_status():
         data['gateway'] = gws.get(iface)
     return result
 
+def _read_sys(path, cast=str):
+    try:
+        with open(path) as f:
+            return cast(f.read().strip())
+    except Exception:
+        return None
+
+def classify_iface(name):
+    if name.startswith('enx'):
+        return 'usb'
+    if name.startswith(('enp', 'eno', 'eth')):
+        return 'onboard'
+    return 'other'
+
+def get_iface_details():
+    """Enriched per-NIC info for the scan page."""
+    base = get_iface_status()
+    cfg  = load_cfg()
+    uplink = get_uplink_iface()
+    counts = {}
+    for p in cfg['proxies']:
+        counts[p['interface']] = counts.get(p['interface'], 0) + 1
+    result = {}
+    for i, info in base.items():
+        d = dict(info)
+        d['type']        = classify_iface(i)
+        d['mac']         = _read_sys(f'{SYS_NET}/{i}/address')
+        d['link_speed']  = _read_sys(f'{SYS_NET}/{i}/speed', int)
+        d['duplex']      = _read_sys(f'{SYS_NET}/{i}/duplex')
+        d['mtu']         = _read_sys(f'{SYS_NET}/{i}/mtu', int)
+        d['rx_bytes']    = _read_sys(f'{SYS_NET}/{i}/statistics/rx_bytes', int)
+        d['tx_bytes']    = _read_sys(f'{SYS_NET}/{i}/statistics/tx_bytes', int)
+        d['operstate']   = _read_sys(f'{SYS_NET}/{i}/operstate')
+        try:
+            d['driver'] = os.path.basename(os.readlink(f'{SYS_NET}/{i}/device/driver'))
+        except Exception:
+            d['driver'] = None
+        d['configured']  = i in cfg['interfaces']
+        d['cfg']         = cfg['interfaces'].get(i)
+        d['proxy_count'] = counts.get(i, 0)
+        d['is_uplink']   = (i == uplink)
+        result[i] = d
+    return result
+
 # ── netplan + routing ─────────────────────────────────────────────────────────
 
 def update_netplan(iface, ip, prefix, gateway, t):
@@ -160,6 +204,42 @@ def reload_3proxy():
 @app.route('/')
 def index():
     return render_template('index.html')
+
+@app.route('/scan')
+def scan_page():
+    return render_template('scan.html')
+
+@app.route('/api/scan')
+def api_scan():
+    return jsonify(get_iface_details())
+
+@app.route('/api/speedtest/<iface>', methods=['POST'])
+def api_speedtest(iface):
+    if iface not in list_nics():
+        return jsonify({'success': False, 'error': 'Unknown interface'}), 400
+    cfg = load_cfg()
+    src_ip = (cfg['interfaces'].get(iface) or {}).get('ip')
+    if not src_ip:
+        live = get_iface_status().get(iface) or {}
+        src_ip = live.get('ip')
+    if not src_ip:
+        return jsonify({'success': False, 'error': 'No IP bound to interface'}), 400
+    out, err, rc = run(['speedtest-cli', '--source', src_ip, '--json', '--secure'])
+    if rc != 0 or not out:
+        return jsonify({'success': False, 'error': (err or 'speedtest-cli failed')[:400]}), 500
+    try:
+        data = json.loads(out)
+    except Exception as e:
+        return jsonify({'success': False, 'error': f'parse error: {e}'}), 500
+    return jsonify({
+        'success':       True,
+        'download_mbps': round(data.get('download', 0) / 1_000_000, 2),
+        'upload_mbps':   round(data.get('upload', 0) / 1_000_000, 2),
+        'ping_ms':       round(data.get('ping', 0), 1),
+        'server':        (data.get('server') or {}).get('host'),
+        'isp':           data.get('client', {}).get('isp'),
+        'source_ip':     src_ip,
+    })
 
 def get_tailscale_ip():
     out, _, _ = run(['ip', 'addr', 'show', 'tailscale0'])

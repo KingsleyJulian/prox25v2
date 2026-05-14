@@ -8,7 +8,7 @@ apt-get update -qq 2>/dev/null || apt-get update --fix-missing -qq || true
 
 # Python deps
 apt-get install -y python3 python3-pip build-essential git
-pip3 install flask pyyaml
+pip3 install flask pyyaml speedtest-cli
 
 # Build 3proxy from source (not in Ubuntu 24.04 repos)
 if ! command -v 3proxy &>/dev/null; then
@@ -33,6 +33,7 @@ mkdir -p /var/log/3proxy
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cp "$SCRIPT_DIR/app.py" /opt/proxymanager/
 cp "$SCRIPT_DIR/templates/index.html" /opt/proxymanager/templates/
+cp "$SCRIPT_DIR/templates/scan.html" /opt/proxymanager/templates/
 
 # Systemd service for ProxyManager web UI
 cat > /etc/systemd/system/proxymanager.service << 'EOF'

@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Port Scan — ProxyManager</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
+  <style>
+    body { background:#0d1117; color:#e6edf3; }
+    .card { background:#161b22; border-color:#30363d; }
+    .nav-tabs .nav-link.active { background:#161b22; border-color:#30363d #30363d #161b22; color:#fff; }
+    .nav-tabs .nav-link { color:#8b949e; border-color:transparent; }
+    .nav-tabs { border-color:#30363d; }
+    code { color:#79c0ff; }
+    .kv { display:grid; grid-template-columns: 110px 1fr; row-gap:.25rem; column-gap:.5rem; font-size:.85rem; }
+    .kv .k { color:#8b949e; }
+    .kv .v { color:#e6edf3; word-break:break-all; }
+    .speed-box { background:#0d1117; border:1px solid #30363d; border-radius:6px; padding:.5rem .75rem; }
+    .speed-num { font-size:1.4rem; font-weight:600; color:#58a6ff; line-height:1.1; }
+    .speed-lbl { font-size:.7rem; color:#8b949e; text-transform:uppercase; letter-spacing:.05em; }
+    #toast-container { position:fixed; bottom:1.5rem; right:1.5rem; z-index:9999; }
+    .port-wrap { background:#0d1117; border:1px solid #30363d; border-radius:6px; padding:.75rem; display:flex; align-items:center; justify-content:center; min-height:140px; }
+    .badge-iface { font-size:.7rem; font-weight:600; }
+
+    /* LED animations */
+    @keyframes blinkAct { 0%,49%{opacity:1;} 50%,100%{opacity:.15;} }
+    .led-link.on  { fill:#3fb950; filter: drop-shadow(0 0 4px #3fb950); }
+    .led-link.off { fill:#30363d; }
+    .led-act.on   { fill:#f0c000; filter: drop-shadow(0 0 4px #f0c000); animation: blinkAct 0.9s infinite; }
+    .led-act.off  { fill:#30363d; }
+
+    /* RJ45 jack shared */
+    .jack-body  { fill:#1c2128; stroke:#484f58; stroke-width:1.5; }
+    .jack-slot  { fill:#0d1117; }
+    .jack-pin   { stroke:#c9a227; stroke-width:.6; }
+    .cable      { stroke:#388bfd; stroke-width:3; fill:none; stroke-linecap:round; }
+    .cable.dim  { stroke:#30363d; }
+    .usb-body   { fill:#2d333b; stroke:#484f58; stroke-width:1.2; }
+    .usb-tip    { fill:#8b949e; }
+    .label-pin  { fill:#8b949e; font:600 9px/1 system-ui; }
+  </style>
+</head>
+<body>
+
+<nav class="navbar px-3" style="background:#161b22; border-bottom:1px solid #30363d; height:54px;">
+  <span class="fw-bold text-white"><i class="bi bi-hdd-network-fill text-primary me-2"></i>ProxyManager</span>
+  <span class="text-muted small"><i class="bi bi-circle-fill text-success me-1" style="font-size:.5rem;"></i>phserver1</span>
+</nav>
+
+<div class="container-fluid py-3 px-4" style="max-width:1400px;">
+
+  <ul class="nav nav-tabs mb-3">
+    <li class="nav-item"><a class="nav-link" href="/"><i class="bi bi-ethernet me-1"></i>Interfaces</a></li>
+    <li class="nav-item"><a class="nav-link" href="/#proxies"><i class="bi bi-shield-lock me-1"></i>Proxy Accounts</a></li>
+    <li class="nav-item"><a class="nav-link active" href="/scan"><i class="bi bi-radar me-1"></i>Port Scan</a></li>
+  </ul>
+
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <div>
+      <h5 class="mb-0">Physical Port Scan</h5>
+      <small class="text-muted">Live status of every detected NIC. Onboard ports show as RJ45 jacks; USB adapters show as dongles.</small>
+    </div>
+    <div class="d-flex gap-2">
+      <span class="text-muted small align-self-center" id="lastScan">—</span>
+      <button class="btn btn-sm btn-outline-secondary" onclick="loadScan()"><i class="bi bi-arrow-clockwise me-1"></i>Rescan</button>
+    </div>
+  </div>
+
+  <div id="scanGrid" class="row g-3"></div>
+</div>
+
+<div id="toast-container"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+let prevStats = {};  // iface -> {rx, tx, t}
+let scanData  = {};
+
+function toast(msg, type='success') {
+  const id = 'tx' + Date.now();
+  const el = document.createElement('div');
+  el.className = `toast align-items-center text-bg-${type} border-0 mb-2 show`;
+  el.id = id;
+  el.innerHTML = `<div class="d-flex"><div class="toast-body">${msg}</div><button class="btn-close btn-close-white me-2 m-auto" onclick="document.getElementById('${id}').remove()"></button></div>`;
+  document.getElementById('toast-container').appendChild(el);
+  setTimeout(() => el.remove(), 4000);
+}
+
+function fmtBytes(n) {
+  if (n == null) return '—';
+  const u = ['B','KB','MB','GB','TB'];
+  let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return n.toFixed(i === 0 ? 0 : 1) + ' ' + u[i];
+}
+
+function fmtRate(bps) {
+  if (bps == null || bps < 0) return '0 B/s';
+  return fmtBytes(bps) + '/s';
+}
+
+// ── SVG renderers ─────────────────────────────────────────────────────────
+function svgOnboardJack(linkOn, actOn) {
+  // RJ45 jack viewed face-on with two LEDs above
+  return `
+  <svg viewBox="0 0 180 110" width="180" height="110">
+    <!-- mounting bracket plate -->
+    <rect x="10" y="10" width="160" height="90" rx="4" fill="#161b22" stroke="#30363d"/>
+    <!-- jack body -->
+    <rect x="40" y="30" width="100" height="55" rx="3" class="jack-body"/>
+    <!-- inner slot -->
+    <rect x="48" y="42" width="84" height="35" class="jack-slot"/>
+    <!-- contact pins -->
+    ${Array.from({length:8}, (_,i) => `<line x1="${52+i*10}" y1="46" x2="${52+i*10}" y2="60" class="jack-pin"/>`).join('')}
+    <!-- tab notch underneath -->
+    <polygon points="70,85 110,85 105,92 75,92" fill="#1c2128" stroke="#484f58" stroke-width="1.2"/>
+    <!-- LEDs (left=link, right=activity) -->
+    <circle cx="55"  cy="22" r="4" class="led-link ${linkOn?'on':'off'}"/>
+    <circle cx="125" cy="22" r="4" class="led-act ${actOn?'on':'off'}"/>
+    <text x="55"  y="105" text-anchor="middle" class="label-pin">LINK</text>
+    <text x="125" y="105" text-anchor="middle" class="label-pin">ACT</text>
+  </svg>`;
+}
+
+function svgUsbAdapter(linkOn, actOn) {
+  // USB-A plug -> cable -> RJ45 dongle
+  const cableClass = linkOn ? 'cable' : 'cable dim';
+  return `
+  <svg viewBox="0 0 260 110" width="260" height="110">
+    <!-- USB-A plug -->
+    <rect x="6"  y="40" width="14" height="30" class="usb-tip"/>
+    <rect x="20" y="34" width="34" height="42" rx="2" class="usb-body"/>
+    <rect x="26" y="44" width="6"  height="22" fill="#0d1117"/>
+    <rect x="38" y="44" width="6"  height="22" fill="#0d1117"/>
+    <!-- cable curve -->
+    <path d="M54 55 C 90 55, 110 85, 150 70" class="${cableClass}"/>
+    <!-- dongle/RJ45 body -->
+    <rect x="150" y="35" width="100" height="55" rx="6" class="jack-body"/>
+    <rect x="160" y="50" width="80"  height="28" class="jack-slot"/>
+    ${Array.from({length:8}, (_,i) => `<line x1="${164+i*9.5}" y1="53" x2="${164+i*9.5}" y2="65" class="jack-pin"/>`).join('')}
+    <polygon points="180,90 220,90 215,97 185,97" fill="#1c2128" stroke="#484f58" stroke-width="1.2"/>
+    <!-- LEDs on dongle -->
+    <circle cx="165" cy="43" r="3.5" class="led-link ${linkOn?'on':'off'}"/>
+    <circle cx="235" cy="43" r="3.5" class="led-act ${actOn?'on':'off'}"/>
+    <text x="35"  y="100" text-anchor="middle" class="label-pin">USB</text>
+    <text x="165" y="105" text-anchor="middle" class="label-pin">LINK</text>
+    <text x="235" y="105" text-anchor="middle" class="label-pin">ACT</text>
+  </svg>`;
+}
+
+function renderPortGraphic(d) {
+  const linkOn = !!d.connected;
+  const actOn  = linkOn && (d._rxRate > 1024 || d._txRate > 1024);
+  return d.type === 'usb' ? svgUsbAdapter(linkOn, actOn) : svgOnboardJack(linkOn, actOn);
+}
+
+// ── grid render ───────────────────────────────────────────────────────────
+function renderGrid(data) {
+  const ifaces = Object.keys(data).sort();
+  const grid = document.getElementById('scanGrid');
+  if (!ifaces.length) {
+    grid.innerHTML = '<div class="col-12 text-center text-muted py-5">No physical interfaces detected</div>';
+    return;
+  }
+  grid.innerHTML = ifaces.map(name => {
+    const d = data[name];
+    const linkBadge = !d.connected
+      ? '<span class="badge bg-secondary badge-iface">No Carrier</span>'
+      : `<span class="badge bg-success badge-iface">Link ${d.link_speed?d.link_speed+'M':''}${d.duplex==='full'?' FD':''}</span>`;
+    const uplink = d.is_uplink ? '<span class="badge bg-info badge-iface ms-1">Uplink</span>' : '';
+    const typeBadge = d.type === 'usb'
+      ? '<span class="badge bg-warning text-dark badge-iface ms-1">USB</span>'
+      : '<span class="badge bg-primary badge-iface ms-1">Onboard</span>';
+    return `
+    <div class="col-xl-6">
+      <div class="card h-100">
+        <div class="card-body">
+          <div class="d-flex justify-content-between align-items-start mb-2">
+            <div>
+              <h6 class="mb-1 text-white">${name} ${typeBadge}${uplink}</h6>
+              <div>${linkBadge}</div>
+            </div>
+            <button class="btn btn-sm btn-outline-primary" id="st-btn-${name}" onclick="runSpeedTest('${name}')" ${d.configured?'':'disabled title="Configure interface first"'}>
+              <i class="bi bi-speedometer me-1"></i>Speed Test
+            </button>
+          </div>
+
+          <div class="row g-3 mt-1">
+            <div class="col-md-5">
+              <div class="port-wrap" id="port-${name}">${renderPortGraphic(d)}</div>
+              <div class="d-flex justify-content-between mt-2 small text-muted">
+                <span><i class="bi bi-arrow-down"></i> <span id="rx-${name}">0 B/s</span></span>
+                <span><i class="bi bi-arrow-up"></i>   <span id="tx-${name}">0 B/s</span></span>
+              </div>
+            </div>
+            <div class="col-md-7">
+              <div class="kv">
+                <span class="k">IP / Prefix</span><span class="v">${d.ip ? d.ip+'/'+d.prefix : '<span class=\"text-muted\">—</span>'}</span>
+                <span class="k">Gateway</span><span class="v">${d.gateway || '<span class=\"text-muted\">—</span>'}</span>
+                <span class="k">MAC</span><span class="v"><code>${d.mac || '—'}</code></span>
+                <span class="k">Driver</span><span class="v">${d.driver || '—'}</span>
+                <span class="k">Speed / Duplex</span><span class="v">${d.link_speed?d.link_speed+' Mbps':'—'} ${d.duplex||''}</span>
+                <span class="k">MTU</span><span class="v">${d.mtu || '—'}</span>
+                <span class="k">Oper State</span><span class="v">${d.operstate || '—'}</span>
+                <span class="k">Routing Table</span><span class="v">${d.cfg?.table_id || '<span class=\"text-muted\">not configured</span>'}</span>
+                <span class="k">Proxies</span><span class="v">${d.proxy_count || 0}</span>
+                <span class="k">RX / TX Total</span><span class="v">${fmtBytes(d.rx_bytes)} / ${fmtBytes(d.tx_bytes)}</span>
+              </div>
+              <div class="row mt-3 g-2" id="speed-${name}">
+                <div class="col-4"><div class="speed-box"><div class="speed-num" id="dl-${name}">—</div><div class="speed-lbl">Down Mbps</div></div></div>
+                <div class="col-4"><div class="speed-box"><div class="speed-num" id="ul-${name}">—</div><div class="speed-lbl">Up Mbps</div></div></div>
+                <div class="col-4"><div class="speed-box"><div class="speed-num" id="pg-${name}">—</div><div class="speed-lbl">Ping ms</div></div></div>
+              </div>
+              <div class="small text-muted mt-1" id="st-meta-${name}"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// ── load + rate calc ──────────────────────────────────────────────────────
+async function loadScan() {
+  const res = await fetch('/api/scan');
+  const data = await res.json();
+  const now = Date.now();
+  // compute rates from previous sample
+  Object.entries(data).forEach(([name, d]) => {
+    const prev = prevStats[name];
+    if (prev && d.rx_bytes != null && d.tx_bytes != null) {
+      const dt = (now - prev.t) / 1000;
+      d._rxRate = Math.max(0, (d.rx_bytes - prev.rx) / dt);
+      d._txRate = Math.max(0, (d.tx_bytes - prev.tx) / dt);
+    } else {
+      d._rxRate = d._txRate = 0;
+    }
+    prevStats[name] = { rx: d.rx_bytes, tx: d.tx_bytes, t: now };
+  });
+  scanData = data;
+  renderGrid(data);
+  // patch the live rate readouts
+  Object.entries(data).forEach(([name, d]) => {
+    const rxEl = document.getElementById(`rx-${name}`);
+    const txEl = document.getElementById(`tx-${name}`);
+    if (rxEl) rxEl.textContent = fmtRate(d._rxRate);
+    if (txEl) txEl.textContent = fmtRate(d._txRate);
+  });
+  document.getElementById('lastScan').textContent = 'Updated ' + new Date().toLocaleTimeString();
+}
+
+// ── speed test ────────────────────────────────────────────────────────────
+async function runSpeedTest(iface) {
+  const btn = document.getElementById(`st-btn-${iface}`);
+  const dl = document.getElementById(`dl-${iface}`);
+  const ul = document.getElementById(`ul-${iface}`);
+  const pg = document.getElementById(`pg-${iface}`);
+  const meta = document.getElementById(`st-meta-${iface}`);
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Running…';
+  dl.textContent = ul.textContent = pg.textContent = '…';
+  meta.textContent = '';
+  try {
+    const res = await fetch(`/api/speedtest/${iface}`, { method: 'POST' });
+    const r = await res.json();
+    if (!r.success) {
+      toast('Speed test failed: ' + (r.error || 'unknown'), 'danger');
+      dl.textContent = ul.textContent = pg.textContent = '—';
+    } else {
+      dl.textContent = r.download_mbps;
+      ul.textContent = r.upload_mbps;
+      pg.textContent = r.ping_ms;
+      meta.textContent = `via ${r.source_ip} → ${r.server || 'unknown server'} ${r.isp ? '· '+r.isp : ''}`;
+      toast(`${iface}: ${r.download_mbps}↓ / ${r.upload_mbps}↑ Mbps`);
+    }
+  } catch (e) {
+    toast('Speed test error: ' + e, 'danger');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '<i class="bi bi-speedometer me-1"></i>Speed Test';
+  }
+}
+
+loadScan();
+setInterval(loadScan, 4000);
+</script>
+</body>
+</html>
