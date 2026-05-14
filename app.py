@@ -736,6 +736,96 @@ def api_test_all():
 def test_page():
     return render_template('test.html')
 
+@app.route('/api/proxies/test-export.xlsx', methods=['POST'])
+def api_test_export_xlsx():
+    """Build an Excel workbook from a client-supplied list of test results.
+    Body: { "results": [ {id, port, interface, configured_ip, actual_ip,
+                          ip_match, latency_ms, download_mbps, success,
+                          error, ...}, ... ] }
+    """
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+    from io import BytesIO
+
+    body = request.get_json(silent=True) or {}
+    results = body.get('results') or []
+    # Pull live proxy creds so the exported file is immediately usable
+    cfg = load_cfg()
+    by_id = {p['id']: p for p in cfg['proxies']}
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = 'Proxy Test Results'
+
+    headers = [
+        'Status', 'Interface', 'Host', 'Port', 'Username', 'Password',
+        'Configured Exit IP', 'Actual Exit IP', 'IP Match',
+        'Latency (ms)', 'Download (Mbps)', 'Connection String', 'Error',
+    ]
+    head_font = Font(bold=True, color='FFFFFF')
+    head_fill = PatternFill(start_color='1F6FEB', end_color='1F6FEB', fill_type='solid')
+    ok_fill   = PatternFill(start_color='DCFCE7', end_color='DCFCE7', fill_type='solid')
+    fail_fill = PatternFill(start_color='FEE2E2', end_color='FEE2E2', fill_type='solid')
+    warn_fill = PatternFill(start_color='FEF3C7', end_color='FEF3C7', fill_type='solid')
+
+    for col, h in enumerate(headers, 1):
+        c = ws.cell(row=1, column=col, value=h)
+        c.font = head_font
+        c.fill = head_fill
+        c.alignment = Alignment(vertical='center')
+
+    for i, r in enumerate(results, start=2):
+        proxy = by_id.get(r.get('id')) or {}
+        if not r.get('success'):
+            status = 'DOWN'
+            fill = fail_fill
+        elif r.get('ip_match') is False:
+            status = 'IP MISMATCH'
+            fill = warn_fill
+        else:
+            status = 'OK'
+            fill = ok_fill
+        host = r.get('configured_ip') or proxy.get('exit_ip')
+        port = r.get('port') or proxy.get('port')
+        user = proxy.get('username', '')
+        pw   = proxy.get('password', '')
+        conn = f"{host}:{port}:{user}:{pw}" if host and port else ''
+        row = [
+            status,
+            r.get('interface') or proxy.get('interface', ''),
+            host or '',
+            port or '',
+            user,
+            pw,
+            r.get('configured_ip') or '',
+            r.get('actual_ip') or '',
+            'yes' if r.get('ip_match') else ('no' if r.get('ip_match') is False else ''),
+            r.get('latency_ms') if r.get('latency_ms') is not None else '',
+            r.get('download_mbps') if r.get('download_mbps') is not None else '',
+            conn,
+            r.get('error') or '',
+        ]
+        for col, val in enumerate(row, 1):
+            c = ws.cell(row=i, column=col, value=val)
+            c.fill = fill
+
+    # Auto-ish width based on header length
+    widths = [12, 12, 16, 8, 18, 18, 18, 18, 10, 14, 16, 50, 30]
+    for i, w in enumerate(widths, 1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+    ws.freeze_panes = 'A2'
+
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    filename = f"proxy-tests-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}.xlsx"
+    return Response(
+        buf.getvalue(),
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        headers={'Content-Disposition': f'attachment; filename={filename}'},
+    )
+
 @app.route('/api/proxies/export')
 def export_proxies():
     cfg    = load_cfg()

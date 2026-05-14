@@ -59,18 +59,29 @@
       <select id="filterIface" class="form-select form-select-sm w-auto" onchange="loadList()">
         <option value="">All interfaces</option>
       </select>
+      <select id="filterStatus" class="form-select form-select-sm w-auto" onchange="render()">
+        <option value="all">All status</option>
+        <option value="down">Down only</option>
+        <option value="ok">Working only</option>
+        <option value="mismatch">IP mismatch only</option>
+        <option value="untested">Not tested</option>
+      </select>
       <button class="btn btn-sm btn-primary" id="testAllBtn" onclick="testAll()">
         <i class="bi bi-play-fill me-1"></i>Test All
+      </button>
+      <button class="btn btn-sm btn-success" id="exportBtn" onclick="exportXlsx()" disabled>
+        <i class="bi bi-file-earmark-excel me-1"></i>Export Excel
       </button>
       <button class="btn btn-sm btn-outline-secondary" onclick="loadList()"><i class="bi bi-arrow-clockwise me-1"></i>Refresh</button>
     </div>
   </div>
 
-  <!-- Summary -->
+  <!-- Summary (click a tile to filter) -->
   <div class="d-flex gap-2 mb-3 flex-wrap">
-    <div class="summary-box"><div class="summary-num" id="sumTotal">0</div><div class="summary-lbl">Total</div></div>
-    <div class="summary-box"><div class="summary-num" id="sumOk" style="color:#3fb950;">0</div><div class="summary-lbl">Working</div></div>
-    <div class="summary-box"><div class="summary-num" id="sumFail" style="color:#f85149;">0</div><div class="summary-lbl">Failed</div></div>
+    <div class="summary-box" style="cursor:pointer;" onclick="setFilter('all')"><div class="summary-num" id="sumTotal">0</div><div class="summary-lbl">Total</div></div>
+    <div class="summary-box" style="cursor:pointer;" onclick="setFilter('ok')"><div class="summary-num" id="sumOk" style="color:#3fb950;">0</div><div class="summary-lbl">Working</div></div>
+    <div class="summary-box" style="cursor:pointer;" onclick="setFilter('down')"><div class="summary-num" id="sumFail" style="color:#f85149;">0</div><div class="summary-lbl">Down</div></div>
+    <div class="summary-box" style="cursor:pointer;" onclick="setFilter('mismatch')"><div class="summary-num" id="sumMismatch" style="color:#d29922;">0</div><div class="summary-lbl">IP Mismatch</div></div>
     <div class="summary-box"><div class="summary-num" id="sumAvgDown">—</div><div class="summary-lbl">Avg Mbps</div></div>
     <div class="summary-box"><div class="summary-num" id="sumAvgLat">—</div><div class="summary-lbl">Avg Ping ms</div></div>
   </div>
@@ -154,6 +165,18 @@ async function loadList() {
   render();
 }
 
+function statusOf(r) {
+  if (!r || r.pending) return r && r.pending ? 'testing' : 'untested';
+  if (!r.success) return 'down';
+  if (r.ip_match === false) return 'mismatch';
+  return 'ok';
+}
+
+function setFilter(v) {
+  document.getElementById('filterStatus').value = v;
+  render();
+}
+
 function render() {
   const tbody = document.getElementById('tbody');
   if (!proxies.length) {
@@ -161,7 +184,17 @@ function render() {
     updateSummary();
     return;
   }
-  tbody.innerHTML = proxies.map(p => {
+  const filter = document.getElementById('filterStatus').value;
+  const visible = proxies.filter(p => {
+    if (filter === 'all') return true;
+    return statusOf(results[p.id]) === filter;
+  });
+  if (!visible.length) {
+    tbody.innerHTML = `<tr><td colspan="8" class="text-center text-muted py-4">No proxies match filter: <code>${filter}</code></td></tr>`;
+    updateSummary();
+    return;
+  }
+  tbody.innerHTML = visible.map(p => {
     const r = results[p.id];
     const ipCell = r && r.actual_ip
       ? (r.ip_match ? `<code class="text-success">${r.actual_ip}</code>` : `<code class="text-warning">${r.actual_ip}</code>`)
@@ -198,15 +231,66 @@ function escapeHtml(s) {
 
 function updateSummary() {
   const tested = proxies.filter(p => results[p.id] && !results[p.id].pending);
-  const ok = tested.filter(p => results[p.id].success);
-  const fail = tested.filter(p => !results[p.id].success);
-  document.getElementById('sumTotal').textContent = proxies.length;
-  document.getElementById('sumOk').textContent    = ok.length;
-  document.getElementById('sumFail').textContent  = fail.length;
-  const dls = ok.map(p => results[p.id].download_mbps).filter(v => v != null);
-  const lats = ok.map(p => results[p.id].latency_ms).filter(v => v != null);
+  const ok       = tested.filter(p => statusOf(results[p.id]) === 'ok');
+  const down     = tested.filter(p => statusOf(results[p.id]) === 'down');
+  const mismatch = tested.filter(p => statusOf(results[p.id]) === 'mismatch');
+  document.getElementById('sumTotal').textContent    = proxies.length;
+  document.getElementById('sumOk').textContent       = ok.length;
+  document.getElementById('sumFail').textContent     = down.length;
+  document.getElementById('sumMismatch').textContent = mismatch.length;
+  const okIds = ok.map(p => p.id);
+  const dls   = okIds.map(id => results[id].download_mbps).filter(v => v != null);
+  const lats  = okIds.map(id => results[id].latency_ms).filter(v => v != null);
   document.getElementById('sumAvgDown').textContent = dls.length ? (dls.reduce((a,b)=>a+b,0)/dls.length).toFixed(1) : '—';
   document.getElementById('sumAvgLat').textContent  = lats.length ? Math.round(lats.reduce((a,b)=>a+b,0)/lats.length) : '—';
+  // Export only meaningful once at least one test has run
+  document.getElementById('exportBtn').disabled = (tested.length === 0);
+}
+
+async function exportXlsx() {
+  // Export every visible proxy, attaching its result if present.
+  const filter = document.getElementById('filterStatus').value;
+  const visible = proxies.filter(p => {
+    if (filter === 'all') return true;
+    return statusOf(results[p.id]) === filter;
+  });
+  if (!visible.length) { toast('Nothing to export', 'warning'); return; }
+  const payload = {
+    results: visible.map(p => {
+      const r = results[p.id] || {};
+      return {
+        id:            p.id,
+        port:          p.port,
+        interface:     p.interface,
+        configured_ip: p.exit_ip,
+        actual_ip:     r.actual_ip,
+        ip_match:      r.ip_match,
+        latency_ms:    r.latency_ms,
+        download_mbps: r.download_mbps,
+        success:       r.success,
+        error:         r.error,
+      };
+    }),
+  };
+  try {
+    const res = await fetch('/api/proxies/test-export.xlsx', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) { toast('Export failed: HTTP ' + res.status, 'danger'); return; }
+    const blob = await res.blob();
+    const cd = res.headers.get('Content-Disposition') || '';
+    const m = cd.match(/filename=([^;]+)/);
+    const fname = m ? m[1].trim() : 'proxy-tests.xlsx';
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = fname; a.click();
+    URL.revokeObjectURL(url);
+    toast(`Exported ${payload.results.length} rows to ${fname}`);
+  } catch (e) {
+    toast('Export failed: ' + e, 'danger');
+  }
 }
 
 async function testOne(pid) {

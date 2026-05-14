@@ -15,7 +15,7 @@ if [ ! -x /opt/proxymanager/venv/bin/python3 ]; then
   python3 -m venv /opt/proxymanager/venv
 fi
 /opt/proxymanager/venv/bin/pip install --upgrade pip
-/opt/proxymanager/venv/bin/pip install flask pyyaml speedtest-cli
+/opt/proxymanager/venv/bin/pip install flask pyyaml speedtest-cli openpyxl
 
 # Build 3proxy from source (not in Ubuntu 24.04 repos)
 if ! command -v 3proxy &>/dev/null; then
