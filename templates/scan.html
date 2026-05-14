@@ -181,9 +181,14 @@ function renderGrid(data) {
               <h6 class="mb-1 text-white">${name} ${typeBadge}${uplink}</h6>
               <div>${linkBadge}</div>
             </div>
-            <button class="btn btn-sm btn-outline-primary" id="st-btn-${name}" onclick="runSpeedTest('${name}')" ${d.configured?'':'disabled title="Configure interface first"'}>
-              <i class="bi bi-speedometer me-1"></i>Speed Test
-            </button>
+            <div class="d-flex gap-2">
+              ${d.is_uplink
+                ? '<button class="btn btn-sm btn-info" disabled><i class="bi bi-broadcast me-1"></i>Active Uplink</button>'
+                : `<button class="btn btn-sm btn-outline-info" id="up-btn-${name}" onclick="setUplink('${name}')" ${d.configured?'':'disabled title="Configure interface first"'}><i class="bi bi-broadcast me-1"></i>Set Uplink</button>`}
+              <button class="btn btn-sm btn-outline-primary" id="st-btn-${name}" onclick="runSpeedTest('${name}')" ${d.configured?'':'disabled title="Configure interface first"'}>
+                <i class="bi bi-speedometer me-1"></i>Speed Test
+              </button>
+            </div>
           </div>
 
           <div class="row g-3 mt-1">
@@ -248,6 +253,31 @@ async function loadScan() {
     if (txEl) txEl.textContent = fmtRate(d._txRate);
   });
   document.getElementById('lastScan').textContent = 'Updated ' + new Date().toLocaleTimeString();
+}
+
+// ── set uplink ───────────────────────────────────────────────────────────
+async function setUplink(iface) {
+  if (!confirm(`Move the main default route to ${iface}?\n\nThis will change which NIC carries Tailscale and all outbound traffic. Make sure you can still reach the server through the new route.`)) return;
+  const btn = document.getElementById(`up-btn-${iface}`);
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Switching…'; }
+  try {
+    const res = await fetch('/api/uplink', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ interface: iface })
+    });
+    const r = await res.json();
+    if (r.success) {
+      toast(`Uplink moved to ${iface}`);
+      loadScan();
+    } else {
+      toast('Failed: ' + (r.error || 'unknown'), 'danger');
+      loadScan();
+    }
+  } catch (e) {
+    toast('Error: ' + e, 'danger');
+    loadScan();
+  }
 }
 
 // ── speed test ────────────────────────────────────────────────────────────
