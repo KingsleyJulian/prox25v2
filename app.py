@@ -1,5 +1,6 @@
 from flask import Flask, render_template, jsonify, request, Response
-import subprocess, json, os, re, sys, time, yaml, uuid, random, string
+import subprocess, json, os, re, sys, time, yaml, uuid, random, string, threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import ipaddress
 
@@ -270,22 +271,57 @@ def api_scan():
 
 @app.route('/api/isp')
 def api_isp_all():
-    """Refresh-on-demand ISP info for every configured iface. Honours the cache
-    so polling is cheap. Pass ?force=1 to bypass the cache."""
+    """Refresh-on-demand ISP info for every configured iface, in parallel.
+    Honours the cache so polling is cheap. ?force=1 bypasses cache, ?iface=<n>
+    scopes to one NIC."""
     force = request.args.get('force') == '1'
     only  = request.args.get('iface')
     cfg = load_cfg()
-    out = {}
     details = get_iface_status()
+    targets = []
     for name in list_nics():
         if only and name != only:
             continue
         ip = (cfg['interfaces'].get(name) or {}).get('ip') or (details.get(name) or {}).get('ip')
         if not ip:
-            out[name] = {'error': 'no ip'}
             continue
-        out[name] = lookup_isp(name, ip, force=force)
+        targets.append((name, ip))
+    out = {}
+    if targets:
+        with ThreadPoolExecutor(max_workers=min(8, len(targets))) as pool:
+            futures = {pool.submit(lookup_isp, n, ip, force): n for n, ip in targets}
+            for fut in futures:
+                name = futures[fut]
+                try:
+                    out[name] = fut.result(timeout=15)
+                except Exception as e:
+                    out[name] = {'error': f'{type(e).__name__}: {e}'}
+    # Include "no ip" rows too so the frontend can render them
+    for name in list_nics():
+        if only and name != only:
+            continue
+        if name not in out:
+            out[name] = {'error': 'no ip'}
     return jsonify(out)
+
+def warm_isp_cache():
+    """Background pre-fetch of ISP info for every configured iface so the
+    /scan page shows location instantly on first open."""
+    try:
+        cfg = load_cfg()
+        details = get_iface_status()
+        targets = []
+        for name in list_nics():
+            ip = (cfg['interfaces'].get(name) or {}).get('ip') or (details.get(name) or {}).get('ip')
+            if ip:
+                targets.append((name, ip))
+        if not targets:
+            return
+        with ThreadPoolExecutor(max_workers=min(8, len(targets))) as pool:
+            for name, ip in targets:
+                pool.submit(lookup_isp, name, ip, False)
+    except Exception:
+        pass  # never let cache warming crash the app
 
 @app.route('/api/speedtest/<iface>', methods=['POST'])
 def api_speedtest(iface):
@@ -530,4 +566,7 @@ if __name__ == '__main__':
     if _cfg.get('proxies'):
         write_3proxy(_cfg['proxies'])
         reload_3proxy()
+    # Pre-warm ISP cache in a background thread so /scan shows location
+    # without waiting on the first page open.
+    threading.Thread(target=warm_isp_cache, daemon=True).start()
     app.run(host='0.0.0.0', port=8080, debug=False)

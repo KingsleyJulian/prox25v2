@@ -211,7 +211,7 @@ function renderGrid(data) {
                 <span class="k">Routing Table</span><span class="v">${d.cfg?.table_id || '<span class=\"text-muted\">not configured</span>'}</span>
                 <span class="k">Proxies</span><span class="v">${d.proxy_count || 0}</span>
                 <span class="k">RX / TX Total</span><span class="v">${fmtBytes(d.rx_bytes)} / ${fmtBytes(d.tx_bytes)}</span>
-                <span class="k">ISP</span><span class="v" id="isp-${name}"><span class="text-muted">—</span> <button class="btn btn-link btn-sm p-0 ms-1" onclick="refreshIsp('${name}')" title="Refresh"><i class="bi bi-arrow-clockwise"></i></button></span>
+                <span class="k">ISP</span><span class="v" id="isp-${name}"><span class="spinner-border spinner-border-sm text-muted" style="width:.8rem;height:.8rem;"></span> <span class="text-muted small">looking up…</span></span>
                 <span class="k">Public IP</span><span class="v" id="pubip-${name}"><span class="text-muted">—</span></span>
                 <span class="k">Location</span><span class="v" id="geo-${name}"><span class="text-muted">—</span></span>
               </div>
@@ -358,9 +358,11 @@ async function runSpeedTest(iface) {
   }
 }
 
-loadScan().then(() => loadIspAll(false));
+// On first paint, kick off both immediately. /api/isp is cached on the
+// server so this is cheap if warm-up has already run.
+loadScan();
+loadIspAll(false);
 setInterval(loadScan, 4000);
-// Refresh ISP info on a slower cadence; cache on the backend protects ipinfo.io
 setInterval(() => loadIspAll(false), 60000);
 </script>
 </body>
