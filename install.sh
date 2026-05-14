@@ -98,7 +98,7 @@ udevadm trigger --subsystem-match=net --action=add
 
 systemctl daemon-reload
 systemctl enable proxymanager 3proxy
-systemctl start proxymanager 3proxy
+systemctl restart proxymanager 3proxy
 
 SERVER_IP=$(hostname -I | awk '{print $1}')
 TAILSCALE_IP=$(ip addr show tailscale0 2>/dev/null | grep -oP '(?<=inet )\d+\.\d+\.\d+\.\d+' || echo "")
