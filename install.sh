@@ -42,6 +42,7 @@ cp "$SCRIPT_DIR/app.py" /opt/proxymanager/
 cp "$SCRIPT_DIR/templates/index.html" /opt/proxymanager/templates/
 cp "$SCRIPT_DIR/templates/scan.html" /opt/proxymanager/templates/
 cp "$SCRIPT_DIR/templates/update.html" /opt/proxymanager/templates/
+cp "$SCRIPT_DIR/templates/test.html"   /opt/proxymanager/templates/
 
 # Record the source commit so the self-update page can diff against GitHub
 GIT_SHA="$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"

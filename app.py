@@ -646,6 +646,96 @@ def delete_proxy(pid):
     reload_3proxy()
     return jsonify({'success': True})
 
+def _test_one_proxy(p, dl_bytes=5_000_000):
+    """Run exit-IP, latency, and download tests through a single SOCKS5 proxy.
+    Returns a dict with all three results plus error info."""
+    proxy_url = f"socks5h://{p['username']}:{p['password']}@127.0.0.1:{p['port']}"
+    out = {
+        'id':            p['id'],
+        'port':          p['port'],
+        'interface':     p['interface'],
+        'configured_ip': p['exit_ip'],
+        'success':       False,
+    }
+    t0 = time.time()
+    try:
+        # 1) Exit IP through the proxy
+        r = subprocess.run(
+            ['curl', '-s', '-m', '12', '-x', proxy_url, 'https://api.ipify.org'],
+            capture_output=True, text=True, timeout=15,
+        )
+        if r.returncode != 0 or not r.stdout.strip():
+            out['error'] = (r.stderr or 'connect failed').strip()[:200]
+            return out
+        actual_ip = r.stdout.strip()
+        out['actual_ip']    = actual_ip
+        out['ip_match']     = (actual_ip == p['exit_ip'])
+
+        # 2) Latency — small request, take total time
+        r = subprocess.run(
+            ['curl', '-s', '-m', '10', '-x', proxy_url, '-o', '/dev/null',
+             '-w', '%{time_total}',
+             'https://www.cloudflare.com/cdn-cgi/trace'],
+            capture_output=True, text=True, timeout=12,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            try:
+                out['latency_ms'] = round(float(r.stdout.strip()) * 1000)
+            except ValueError:
+                pass
+
+        # 3) Download speed — pulls dl_bytes from Cloudflare speedtest endpoint
+        r = subprocess.run(
+            ['curl', '-s', '-m', '30', '-x', proxy_url, '-o', '/dev/null',
+             '-w', '%{speed_download}',
+             f'https://speed.cloudflare.com/__down?bytes={dl_bytes}'],
+            capture_output=True, text=True, timeout=35,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            try:
+                bps = float(r.stdout.strip())
+                out['download_mbps'] = round(bps * 8 / 1_000_000, 2)
+                out['download_bytes'] = dl_bytes
+            except ValueError:
+                pass
+
+        out['success']    = True
+        out['elapsed_ms'] = round((time.time() - t0) * 1000)
+        return out
+    except subprocess.TimeoutExpired:
+        out['error'] = 'timeout'
+        return out
+    except Exception as e:
+        out['error'] = f'{type(e).__name__}: {e}'
+        return out
+
+@app.route('/api/proxies/<pid>/test', methods=['POST'])
+def api_test_proxy(pid):
+    cfg = load_cfg()
+    p = next((x for x in cfg['proxies'] if x['id'] == pid), None)
+    if not p:
+        return jsonify({'error': 'proxy not found'}), 404
+    return jsonify(_test_one_proxy(p))
+
+@app.route('/api/proxies/test-all', methods=['POST'])
+def api_test_all():
+    """Test every proxy (or only those on a given interface) in parallel."""
+    cfg   = load_cfg()
+    iface = (request.get_json(silent=True) or {}).get('interface') or request.args.get('interface')
+    targets = [p for p in cfg['proxies'] if not iface or p['interface'] == iface]
+    if not targets:
+        return jsonify({'results': []})
+    workers = min(10, len(targets))
+    results = []
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for r in pool.map(_test_one_proxy, targets):
+            results.append(r)
+    return jsonify({'results': results})
+
+@app.route('/test')
+def test_page():
+    return render_template('test.html')
+
 @app.route('/api/proxies/export')
 def export_proxies():
     cfg    = load_cfg()

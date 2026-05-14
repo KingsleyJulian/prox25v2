@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Test Proxies — ProxyManager</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
+  <style>
+    body { background:#0d1117; color:#e6edf3; }
+    .card { background:#161b22; border-color:#30363d; }
+    .nav-tabs .nav-link.active { background:#161b22; border-color:#30363d #30363d #161b22; color:#fff; }
+    .nav-tabs .nav-link { color:#8b949e; border-color:transparent; }
+    .nav-tabs { border-color:#30363d; }
+    .table { --bs-table-bg:#161b22; --bs-table-hover-bg:#1c2128; }
+    th { color:#8b949e; font-weight:500; font-size:.75rem; text-transform:uppercase; letter-spacing:.05em; }
+    td { vertical-align: middle; }
+    code { color:#79c0ff; }
+    .form-control, .form-select { background:#0d1117 !important; border-color:#30363d !important; color:#e6edf3 !important; }
+    .form-control:focus, .form-select:focus { border-color:#58a6ff !important; box-shadow:0 0 0 .2rem rgba(88,166,255,.15) !important; }
+    .pill { display:inline-block; padding:.15rem .55rem; border-radius:99px; font-size:.72rem; font-weight:600; }
+    .pill-ok    { background:rgba(63,185,80,.15);  color:#3fb950; }
+    .pill-fail  { background:rgba(248,81,73,.15);  color:#f85149; }
+    .pill-warn  { background:rgba(210,153,34,.15); color:#d29922; }
+    .pill-idle  { background:#21262d; color:#8b949e; }
+    .speed { font-weight:600; color:#58a6ff; }
+    .latency-good { color:#3fb950; }
+    .latency-meh  { color:#d29922; }
+    .latency-bad  { color:#f85149; }
+    #toast-container { position:fixed; bottom:1.5rem; right:1.5rem; z-index:9999; }
+    .summary-box { background:#0d1117; border:1px solid #30363d; border-radius:6px; padding:.6rem .9rem; min-width:120px; }
+    .summary-num { font-size:1.3rem; font-weight:600; color:#58a6ff; line-height:1.1; }
+    .summary-lbl { font-size:.7rem; color:#8b949e; text-transform:uppercase; letter-spacing:.05em; }
+  </style>
+</head>
+<body>
+
+<nav class="navbar px-3" style="background:#161b22; border-bottom:1px solid #30363d; height:54px;">
+  <span class="fw-bold text-white"><i class="bi bi-hdd-network-fill text-primary me-2"></i>ProxyManager</span>
+  <span class="text-muted small"><i class="bi bi-circle-fill text-success me-1" style="font-size:.5rem;"></i>phserver1</span>
+</nav>
+
+<div class="container-fluid py-3 px-4" style="max-width:1400px;">
+
+  <ul class="nav nav-tabs mb-3">
+    <li class="nav-item"><a class="nav-link" href="/"><i class="bi bi-ethernet me-1"></i>Interfaces</a></li>
+    <li class="nav-item"><a class="nav-link" href="/#proxies"><i class="bi bi-shield-lock me-1"></i>Proxy Accounts</a></li>
+    <li class="nav-item"><a class="nav-link" href="/scan"><i class="bi bi-radar me-1"></i>Port Scan</a></li>
+    <li class="nav-item"><a class="nav-link active" href="/test"><i class="bi bi-speedometer2 me-1"></i>Test Proxies</a></li>
+    <li class="nav-item"><a class="nav-link" href="/update"><i class="bi bi-arrow-up-circle me-1"></i>Self-Update</a></li>
+  </ul>
+
+  <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+    <div>
+      <h5 class="mb-0">Test Proxy Accounts</h5>
+      <small class="text-muted">Verifies each SOCKS5 endpoint actually works, that the exit IP matches its NIC, and measures real download speed through the proxy.</small>
+    </div>
+    <div class="d-flex gap-2 flex-wrap">
+      <select id="filterIface" class="form-select form-select-sm w-auto" onchange="loadList()">
+        <option value="">All interfaces</option>
+      </select>
+      <button class="btn btn-sm btn-primary" id="testAllBtn" onclick="testAll()">
+        <i class="bi bi-play-fill me-1"></i>Test All
+      </button>
+      <button class="btn btn-sm btn-outline-secondary" onclick="loadList()"><i class="bi bi-arrow-clockwise me-1"></i>Refresh</button>
+    </div>
+  </div>
+
+  <!-- Summary -->
+  <div class="d-flex gap-2 mb-3 flex-wrap">
+    <div class="summary-box"><div class="summary-num" id="sumTotal">0</div><div class="summary-lbl">Total</div></div>
+    <div class="summary-box"><div class="summary-num" id="sumOk" style="color:#3fb950;">0</div><div class="summary-lbl">Working</div></div>
+    <div class="summary-box"><div class="summary-num" id="sumFail" style="color:#f85149;">0</div><div class="summary-lbl">Failed</div></div>
+    <div class="summary-box"><div class="summary-num" id="sumAvgDown">—</div><div class="summary-lbl">Avg Mbps</div></div>
+    <div class="summary-box"><div class="summary-num" id="sumAvgLat">—</div><div class="summary-lbl">Avg Ping ms</div></div>
+  </div>
+
+  <div class="card">
+    <div class="card-body p-0">
+      <table class="table table-hover mb-0">
+        <thead><tr>
+          <th class="ps-3">Status</th>
+          <th>Proxy</th>
+          <th>Interface</th>
+          <th>Configured Exit</th>
+          <th>Actual Exit</th>
+          <th>Latency</th>
+          <th>Download</th>
+          <th class="text-end pe-3">Action</th>
+        </tr></thead>
+        <tbody id="tbody">
+          <tr><td colspan="8" class="text-center text-muted py-4">Loading proxies…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <div id="muted" class="text-muted small mt-2"></div>
+
+</div>
+
+<div id="toast-container"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+let proxies = [];
+let results = {};   // id -> result
+let testing = false;
+
+function toast(msg, type='success') {
+  const id = 'tx' + Date.now();
+  const el = document.createElement('div');
+  el.className = `toast align-items-center text-bg-${type} border-0 mb-2 show`;
+  el.id = id;
+  el.innerHTML = `<div class="d-flex"><div class="toast-body">${msg}</div><button class="btn-close btn-close-white me-2 m-auto" onclick="document.getElementById('${id}').remove()"></button></div>`;
+  document.getElementById('toast-container').appendChild(el);
+  setTimeout(() => el.remove(), 3500);
+}
+
+function latencyClass(ms) {
+  if (ms == null) return '';
+  if (ms < 200) return 'latency-good';
+  if (ms < 600) return 'latency-meh';
+  return 'latency-bad';
+}
+
+function statusPill(r) {
+  if (!r) return '<span class="pill pill-idle">Not tested</span>';
+  if (r.pending) return '<span class="pill pill-warn"><span class="spinner-border spinner-border-sm me-1" style="width:.6rem;height:.6rem;"></span>Testing</span>';
+  if (!r.success) return '<span class="pill pill-fail">Failed</span>';
+  if (r.ip_match === false) return '<span class="pill pill-warn">IP mismatch</span>';
+  return '<span class="pill pill-ok">OK</span>';
+}
+
+async function loadList() {
+  const iface = document.getElementById('filterIface').value;
+  const url = '/api/proxies' + (iface ? '?interface=' + iface : '');
+  try {
+    const r = await fetch(url);
+    proxies = await r.json();
+  } catch (e) {
+    document.getElementById('tbody').innerHTML = `<tr><td colspan="8" class="text-danger py-3 text-center">Failed to load proxies: ${e}</td></tr>`;
+    return;
+  }
+  // Also load the iface filter dropdown
+  try {
+    const status = await (await fetch('/api/status')).json();
+    const ifaces = Object.keys(status).filter(i => status[i].configured).sort();
+    const sel = document.getElementById('filterIface');
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">All interfaces</option>' +
+      ifaces.map(i => `<option value="${i}">${i}</option>`).join('');
+    sel.value = cur;
+  } catch (e) {}
+  render();
+}
+
+function render() {
+  const tbody = document.getElementById('tbody');
+  if (!proxies.length) {
+    tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted py-4">No proxy accounts on this interface</td></tr>';
+    updateSummary();
+    return;
+  }
+  tbody.innerHTML = proxies.map(p => {
+    const r = results[p.id];
+    const ipCell = r && r.actual_ip
+      ? (r.ip_match ? `<code class="text-success">${r.actual_ip}</code>` : `<code class="text-warning">${r.actual_ip}</code>`)
+      : '<span class="text-muted">—</span>';
+    const latCell = r && r.latency_ms != null
+      ? `<span class="${latencyClass(r.latency_ms)}">${r.latency_ms} ms</span>`
+      : '<span class="text-muted">—</span>';
+    const dlCell = r && r.download_mbps != null
+      ? `<span class="speed">${r.download_mbps}</span> <span class="text-muted small">Mbps</span>`
+      : '<span class="text-muted">—</span>';
+    const err = r && r.error ? `<div class="small text-danger mt-1">${escapeHtml(r.error)}</div>` : '';
+    return `
+      <tr>
+        <td class="ps-3">${statusPill(r)}${err}</td>
+        <td><code class="small">${p.exit_ip}:${p.port}</code><div class="text-muted small">${p.username}</div></td>
+        <td><code>${p.interface}</code></td>
+        <td><code class="small">${p.exit_ip}</code></td>
+        <td>${ipCell}</td>
+        <td>${latCell}</td>
+        <td>${dlCell}</td>
+        <td class="text-end pe-3">
+          <button class="btn btn-sm btn-outline-primary" onclick="testOne('${p.id}')" ${testing?'disabled':''}>
+            <i class="bi bi-play-fill me-1"></i>Test
+          </button>
+        </td>
+      </tr>`;
+  }).join('');
+  updateSummary();
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function updateSummary() {
+  const tested = proxies.filter(p => results[p.id] && !results[p.id].pending);
+  const ok = tested.filter(p => results[p.id].success);
+  const fail = tested.filter(p => !results[p.id].success);
+  document.getElementById('sumTotal').textContent = proxies.length;
+  document.getElementById('sumOk').textContent    = ok.length;
+  document.getElementById('sumFail').textContent  = fail.length;
+  const dls = ok.map(p => results[p.id].download_mbps).filter(v => v != null);
+  const lats = ok.map(p => results[p.id].latency_ms).filter(v => v != null);
+  document.getElementById('sumAvgDown').textContent = dls.length ? (dls.reduce((a,b)=>a+b,0)/dls.length).toFixed(1) : '—';
+  document.getElementById('sumAvgLat').textContent  = lats.length ? Math.round(lats.reduce((a,b)=>a+b,0)/lats.length) : '—';
+}
+
+async function testOne(pid) {
+  results[pid] = { pending: true };
+  render();
+  try {
+    const r = await fetch(`/api/proxies/${pid}/test`, { method: 'POST' });
+    results[pid] = await r.json();
+  } catch (e) {
+    results[pid] = { success: false, error: String(e) };
+  }
+  render();
+}
+
+async function testAll() {
+  if (testing) return;
+  if (!proxies.length) { toast('No proxies to test', 'warning'); return; }
+  testing = true;
+  const btn = document.getElementById('testAllBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Testing…';
+  // Mark all as pending up front
+  proxies.forEach(p => { results[p.id] = { pending: true }; });
+  render();
+  try {
+    const iface = document.getElementById('filterIface').value;
+    const res = await fetch('/api/proxies/test-all', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ interface: iface || null }),
+    });
+    const data = await res.json();
+    (data.results || []).forEach(r => { results[r.id] = r; });
+    const ok = (data.results || []).filter(r => r.success).length;
+    toast(`Tested ${data.results.length} proxies — ${ok} working`, ok === data.results.length ? 'success' : 'warning');
+  } catch (e) {
+    toast('Test failed: ' + e, 'danger');
+  } finally {
+    testing = false;
+    btn.disabled = false;
+    btn.innerHTML = '<i class="bi bi-play-fill me-1"></i>Test All';
+    render();
+  }
+}
+
+loadList();
+</script>
+</body>
+</html>
