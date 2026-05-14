@@ -433,6 +433,9 @@ def warm_isp_cache():
 
 @app.route('/api/speedtest/<iface>', methods=['POST'])
 def api_speedtest(iface):
+    """Measure ping / download / upload through a specific NIC by binding curl
+    to that NIC's source IP. Hits Cloudflare's speed endpoints — much more
+    reliable than speedtest-cli when forced through a non-default route."""
     try:
         if iface not in list_nics():
             return jsonify({'success': False, 'error': 'Unknown interface'}), 400
@@ -443,29 +446,64 @@ def api_speedtest(iface):
             src_ip = live.get('ip')
         if not src_ip:
             return jsonify({'success': False, 'error': 'No IP bound to interface'}), 400
-        # Invoke speedtest as a module via the same Python interpreter that's
-        # running Flask, so it works regardless of $PATH in the systemd unit.
-        cmd = [sys.executable, '-m', 'speedtest', '--source', src_ip, '--json', '--secure']
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        if r.returncode != 0 or not r.stdout.strip():
-            return jsonify({
-                'success': False,
-                'error': (r.stderr or r.stdout or 'speedtest failed').strip()[:400]
-            }), 500
-        data = json.loads(r.stdout)
-        return jsonify({
-            'success':       True,
-            'download_mbps': round(data.get('download', 0) / 1_000_000, 2),
-            'upload_mbps':   round(data.get('upload', 0) / 1_000_000, 2),
-            'ping_ms':       round(data.get('ping', 0), 1),
-            'server':        (data.get('server') or {}).get('host'),
-            'isp':           (data.get('client') or {}).get('isp'),
-            'source_ip':     src_ip,
-        })
+
+        result = {'success': True, 'source_ip': src_ip, 'server': 'speed.cloudflare.com'}
+        errors = []
+
+        # 1) Ping — total time of a tiny request
+        r = subprocess.run(
+            ['curl', '-s', '-m', '8', '--interface', src_ip, '-o', '/dev/null',
+             '-w', '%{time_total}',
+             'https://www.cloudflare.com/cdn-cgi/trace'],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            try:
+                result['ping_ms'] = round(float(r.stdout.strip()) * 1000, 1)
+            except ValueError:
+                errors.append('ping parse error')
+        else:
+            errors.append(f'ping: {(r.stderr or "fail").strip()[:120]}')
+
+        # 2) Download — pull 25MB, capture speed_download (bytes/sec)
+        r = subprocess.run(
+            ['curl', '-s', '-m', '30', '--interface', src_ip, '-o', '/dev/null',
+             '-w', '%{speed_download}',
+             'https://speed.cloudflare.com/__down?bytes=25000000'],
+            capture_output=True, text=True, timeout=35,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            try:
+                result['download_mbps'] = round(float(r.stdout.strip()) * 8 / 1_000_000, 2)
+            except ValueError:
+                errors.append('download parse error')
+        else:
+            errors.append(f'download: {(r.stderr or "fail").strip()[:120]}')
+
+        # 3) Upload — push 5MB of random bytes, capture speed_upload
+        up_cmd = (
+            f"head -c 5242880 /dev/urandom | "
+            f"curl -s -m 25 --interface {src_ip} -X POST --data-binary @- "
+            f"-o /dev/null -w '%{{speed_upload}}' https://speed.cloudflare.com/__up"
+        )
+        r = subprocess.run(['bash', '-c', up_cmd], capture_output=True, text=True, timeout=30)
+        if r.returncode == 0 and r.stdout.strip():
+            try:
+                result['upload_mbps'] = round(float(r.stdout.strip()) * 8 / 1_000_000, 2)
+            except ValueError:
+                errors.append('upload parse error')
+        else:
+            errors.append(f'upload: {(r.stderr or "fail").strip()[:120]}')
+
+        # If every probe failed, surface that instead of pretending success
+        got_any = any(k in result for k in ('ping_ms', 'download_mbps', 'upload_mbps'))
+        if not got_any:
+            return jsonify({'success': False, 'error': '; '.join(errors) or 'all probes failed'}), 502
+        if errors:
+            result['warnings'] = errors
+        return jsonify(result)
     except subprocess.TimeoutExpired:
-        return jsonify({'success': False, 'error': 'speedtest timed out after 120s'}), 504
-    except FileNotFoundError as e:
-        return jsonify({'success': False, 'error': f'speedtest module not installed: {e}'}), 500
+        return jsonify({'success': False, 'error': 'speedtest timed out'}), 504
     except Exception as e:
         return jsonify({'success': False, 'error': f'{type(e).__name__}: {e}'}), 500
 

@@ -345,12 +345,16 @@ async function runSpeedTest(iface) {
     if (!r.success) {
       toast('Speed test failed: ' + (r.error || 'unknown'), 'danger');
       dl.textContent = ul.textContent = pg.textContent = '—';
+      meta.textContent = r.error ? `error: ${r.error}` : '';
     } else {
-      dl.textContent = r.download_mbps;
-      ul.textContent = r.upload_mbps;
-      pg.textContent = r.ping_ms;
-      meta.textContent = `via ${r.source_ip} → ${r.server || 'unknown server'} ${r.isp ? '· '+r.isp : ''}`;
-      toast(`${iface}: ${r.download_mbps}↓ / ${r.upload_mbps}↑ Mbps`);
+      dl.textContent = (r.download_mbps != null) ? r.download_mbps : '—';
+      ul.textContent = (r.upload_mbps   != null) ? r.upload_mbps   : '—';
+      pg.textContent = (r.ping_ms       != null) ? r.ping_ms       : '—';
+      const parts = [`via ${r.source_ip} → ${r.server || 'speed.cloudflare.com'}`];
+      if (r.warnings && r.warnings.length) parts.push(`partial: ${r.warnings.join(', ')}`);
+      meta.textContent = parts.join(' · ');
+      toast(`${iface}: ${r.download_mbps ?? '—'}↓ / ${r.upload_mbps ?? '—'}↑ Mbps · ${r.ping_ms ?? '—'} ms`,
+            (r.warnings && r.warnings.length) ? 'warning' : 'success');
     }
   } catch (e) {
     toast('Speed test error: ' + e, 'danger');
