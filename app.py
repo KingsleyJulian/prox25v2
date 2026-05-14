@@ -15,6 +15,12 @@ SYS_NET       = '/sys/class/net'
 TABLE_MIN     = 101
 TABLE_MAX     = 249
 
+VERSION_FILE  = '/opt/proxymanager/VERSION'
+REPO_URL      = 'https://github.com/KingsleyJulian/prox25v2.git'
+REPO_API      = 'https://api.github.com/repos/KingsleyJulian/prox25v2'
+UPDATE_SCRIPT = '/opt/proxymanager/_self_update.sh'
+UPDATE_LOG    = '/var/log/proxymanager-update.log'
+
 # ISP lookup cache: iface -> {ip, public_ip, isp, country, city, ts}
 ISP_CACHE = {}
 ISP_TTL   = 900   # 15 minutes — ipinfo rate-limits the free tier
@@ -258,6 +264,108 @@ def index():
 @app.route('/scan')
 def scan_page():
     return render_template('scan.html')
+
+@app.route('/update')
+def update_page():
+    return render_template('update.html')
+
+def read_local_sha():
+    try:
+        with open(VERSION_FILE) as f:
+            return f.read().strip() or None
+    except Exception:
+        return None
+
+@app.route('/api/version')
+def api_version():
+    local_sha = read_local_sha()
+    try:
+        r = subprocess.run(
+            ['curl', '-s', '-m', '10', '-H', 'Accept: application/vnd.github+json',
+             f'{REPO_API}/commits?per_page=20'],
+            capture_output=True, text=True, timeout=12,
+        )
+        commits = json.loads(r.stdout) if r.stdout else []
+    except Exception as e:
+        return jsonify({
+            'local': local_sha, 'local_short': (local_sha or '')[:7],
+            'error': f'{type(e).__name__}: {e}',
+        })
+    if not isinstance(commits, list):
+        msg = (commits or {}).get('message', 'GitHub API error')
+        return jsonify({'local': local_sha, 'error': msg})
+    remote_sha = commits[0]['sha'] if commits else None
+    pending = []
+    for c in commits:
+        if c['sha'] == local_sha:
+            break
+        pending.append({
+            'sha':     c['sha'][:7],
+            'message': c['commit']['message'].split('\n')[0],
+            'author':  c['commit']['author']['name'],
+            'date':    c['commit']['author']['date'],
+            'url':     c.get('html_url'),
+        })
+    return jsonify({
+        'local':        local_sha,
+        'local_short':  local_sha[:7] if local_sha else None,
+        'remote':       remote_sha,
+        'remote_short': remote_sha[:7] if remote_sha else None,
+        'up_to_date':   (local_sha == remote_sha) if (local_sha and remote_sha) else False,
+        'pending':      pending,
+        'pending_count': len(pending),
+    })
+
+@app.route('/api/update', methods=['POST'])
+def api_update():
+    """Run the self-update via systemd-run so the updater survives our own
+    service restart (systemd kills our cgroup when proxymanager bounces)."""
+    script = f"""#!/bin/bash
+set -e
+exec >> {UPDATE_LOG} 2>&1
+echo "=== $(date -Is) self-update started ==="
+REPO=/var/lib/proxymanager/repo
+mkdir -p /var/lib/proxymanager
+if [ -d "$REPO/.git" ]; then
+  git -C "$REPO" fetch --depth=1 origin main
+  git -C "$REPO" reset --hard origin/main
+else
+  rm -rf "$REPO"
+  git clone --depth=1 {REPO_URL} "$REPO"
+fi
+cd "$REPO"
+# Strip CRLF in case the repo was ever touched from Windows
+sed -i 's/\\r$//' install.sh
+bash install.sh
+echo "=== $(date -Is) self-update finished ==="
+"""
+    with open(UPDATE_SCRIPT, 'w') as f:
+        f.write(script)
+    os.chmod(UPDATE_SCRIPT, 0o755)
+    open(UPDATE_LOG, 'a').close()
+    unit = f'proxymanager-update-{int(time.time())}'
+    r = subprocess.run(
+        ['systemd-run', f'--unit={unit}', '--collect', '--no-block',
+         'bash', UPDATE_SCRIPT],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        return jsonify({'success': False, 'error': (r.stderr or 'systemd-run failed').strip()}), 500
+    return jsonify({
+        'success': True,
+        'unit':    unit,
+        'message': 'Update started. The service will restart in ~30s.',
+    })
+
+@app.route('/api/update/log')
+def api_update_log():
+    try:
+        with open(UPDATE_LOG) as f:
+            data = f.read()
+    except FileNotFoundError:
+        data = ''
+    # Tail the last ~4KB so the response stays small
+    return Response(data[-4096:], mimetype='text/plain')
 
 @app.route('/api/scan')
 def api_scan():

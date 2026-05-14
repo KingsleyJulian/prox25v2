@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Self-Update — ProxyManager</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
+  <style>
+    body { background:#0d1117; color:#e6edf3; }
+    .card { background:#161b22; border-color:#30363d; }
+    .nav-tabs .nav-link.active { background:#161b22; border-color:#30363d #30363d #161b22; color:#fff; }
+    .nav-tabs .nav-link { color:#8b949e; border-color:transparent; }
+    .nav-tabs { border-color:#30363d; }
+    code { color:#79c0ff; }
+    .sha-pill { background:#0d1117; border:1px solid #30363d; border-radius:99px; padding:.15rem .55rem; font-family:ui-monospace,SFMono-Regular,monospace; font-size:.8rem; }
+    .commit-row { border-bottom:1px solid #21262d; padding:.6rem 0; }
+    .commit-row:last-child { border-bottom:none; }
+    .pulse { animation: pulse 1.5s ease-in-out infinite; }
+    @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:.4;} }
+    pre.log { background:#010409; border:1px solid #30363d; border-radius:6px; padding:.75rem; max-height:340px; overflow:auto; font-size:.78rem; color:#8b949e; }
+    #toast-container { position:fixed; bottom:1.5rem; right:1.5rem; z-index:9999; }
+  </style>
+</head>
+<body>
+
+<nav class="navbar px-3" style="background:#161b22; border-bottom:1px solid #30363d; height:54px;">
+  <span class="fw-bold text-white"><i class="bi bi-hdd-network-fill text-primary me-2"></i>ProxyManager</span>
+  <span class="text-muted small"><i class="bi bi-circle-fill text-success me-1" style="font-size:.5rem;"></i>phserver1</span>
+</nav>
+
+<div class="container-fluid py-3 px-4" style="max-width:1100px;">
+
+  <ul class="nav nav-tabs mb-3">
+    <li class="nav-item"><a class="nav-link" href="/"><i class="bi bi-ethernet me-1"></i>Interfaces</a></li>
+    <li class="nav-item"><a class="nav-link" href="/#proxies"><i class="bi bi-shield-lock me-1"></i>Proxy Accounts</a></li>
+    <li class="nav-item"><a class="nav-link" href="/scan"><i class="bi bi-radar me-1"></i>Port Scan</a></li>
+    <li class="nav-item"><a class="nav-link active" href="/update"><i class="bi bi-arrow-up-circle me-1"></i>Self-Update</a></li>
+  </ul>
+
+  <div class="card mb-3">
+    <div class="card-body">
+      <div class="d-flex justify-content-between align-items-start flex-wrap gap-3">
+        <div>
+          <h5 class="mb-1">Self-Update</h5>
+          <small class="text-muted">Pulls the latest code from <a href="https://github.com/KingsleyJulian/prox25v2" target="_blank" class="text-info">KingsleyJulian/prox25v2</a> and re-runs <code>install.sh</code> on the server.</small>
+        </div>
+        <button class="btn btn-sm btn-outline-secondary" onclick="checkVersion()"><i class="bi bi-arrow-clockwise me-1"></i>Check Now</button>
+      </div>
+
+      <div class="row mt-4 g-3">
+        <div class="col-md-6">
+          <div class="text-muted small">Installed</div>
+          <div class="d-flex align-items-center gap-2 mt-1">
+            <span class="sha-pill" id="localSha">—</span>
+            <span class="text-muted small" id="localStatus"></span>
+          </div>
+        </div>
+        <div class="col-md-6">
+          <div class="text-muted small">Latest on GitHub</div>
+          <div class="d-flex align-items-center gap-2 mt-1">
+            <span class="sha-pill" id="remoteSha">—</span>
+            <span class="text-muted small" id="remoteStatus"></span>
+          </div>
+        </div>
+      </div>
+
+      <div id="statusBanner" class="alert mt-4 mb-0 d-none"></div>
+
+      <div class="mt-3 d-flex gap-2">
+        <button class="btn btn-primary" id="updateBtn" onclick="doUpdate()" disabled>
+          <i class="bi bi-cloud-download me-1"></i>Update Now
+        </button>
+        <button class="btn btn-outline-secondary" onclick="toggleLog()"><i class="bi bi-terminal me-1"></i>Show Log</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="card mb-3" id="pendingCard" style="display:none;">
+    <div class="card-body">
+      <h6 class="mb-3"><i class="bi bi-list-ul me-1"></i>Pending commits <span class="badge bg-secondary ms-1" id="pendingCount">0</span></h6>
+      <div id="commitList"></div>
+    </div>
+  </div>
+
+  <div class="card mb-3" id="logCard" style="display:none;">
+    <div class="card-body">
+      <h6 class="mb-2"><i class="bi bi-terminal me-1"></i>Update log <small class="text-muted ms-2">/var/log/proxymanager-update.log (last 4KB)</small></h6>
+      <pre class="log" id="logBody">no log yet</pre>
+    </div>
+  </div>
+
+</div>
+
+<div id="toast-container"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+let updating = false;
+
+function toast(msg, type='success') {
+  const id = 'tx' + Date.now();
+  const el = document.createElement('div');
+  el.className = `toast align-items-center text-bg-${type} border-0 mb-2 show`;
+  el.id = id;
+  el.innerHTML = `<div class="d-flex"><div class="toast-body">${msg}</div><button class="btn-close btn-close-white me-2 m-auto" onclick="document.getElementById('${id}').remove()"></button></div>`;
+  document.getElementById('toast-container').appendChild(el);
+  setTimeout(() => el.remove(), 4500);
+}
+
+function fmtDate(iso) {
+  try { return new Date(iso).toLocaleString(); } catch(e){ return iso; }
+}
+
+function banner(kind, html) {
+  const el = document.getElementById('statusBanner');
+  const map = {ok:'success', warn:'warning', err:'danger', info:'info'};
+  el.className = `alert alert-${map[kind]||'info'} mt-4 mb-0`;
+  el.innerHTML = html;
+  el.classList.remove('d-none');
+}
+
+async function checkVersion() {
+  const localEl = document.getElementById('localSha');
+  const remoteEl = document.getElementById('remoteSha');
+  localEl.innerHTML = '<span class="pulse">checking…</span>';
+  remoteEl.innerHTML = '<span class="pulse">checking…</span>';
+  document.getElementById('updateBtn').disabled = true;
+  document.getElementById('pendingCard').style.display = 'none';
+  try {
+    const res = await fetch('/api/version');
+    const v = await res.json();
+    localEl.textContent  = v.local_short  || 'unknown';
+    remoteEl.textContent = v.remote_short || '—';
+    document.getElementById('localStatus').textContent  = v.local  ? '' : 'no VERSION file found';
+    document.getElementById('remoteStatus').textContent = v.error ? v.error : '';
+
+    if (v.error) {
+      banner('err', `<i class="bi bi-exclamation-triangle me-1"></i>Couldn't reach GitHub: ${v.error}`);
+      return;
+    }
+    if (v.up_to_date) {
+      banner('ok', '<i class="bi bi-check-circle me-1"></i>You are running the latest version.');
+      document.getElementById('updateBtn').disabled = true;
+    } else if (v.pending_count > 0) {
+      banner('warn', `<i class="bi bi-cloud-download me-1"></i><strong>${v.pending_count}</strong> new commit${v.pending_count===1?'':'s'} available — click <em>Update Now</em> to apply.`);
+      document.getElementById('updateBtn').disabled = false;
+      renderCommits(v.pending);
+    } else if (!v.local) {
+      banner('warn', '<i class="bi bi-question-circle me-1"></i>No local version recorded. Click Update Now to install the latest commit and create the version marker.');
+      document.getElementById('updateBtn').disabled = false;
+    } else {
+      banner('info', '<i class="bi bi-info-circle me-1"></i>Versions differ but no pending log entries found — local SHA may be ahead or detached.');
+      document.getElementById('updateBtn').disabled = false;
+    }
+  } catch (e) {
+    banner('err', 'Check failed: ' + e);
+  }
+}
+
+function renderCommits(list) {
+  if (!list || !list.length) {
+    document.getElementById('pendingCard').style.display = 'none';
+    return;
+  }
+  document.getElementById('pendingCount').textContent = list.length;
+  document.getElementById('commitList').innerHTML = list.map(c => `
+    <div class="commit-row">
+      <div class="d-flex justify-content-between align-items-start gap-2">
+        <div>
+          <a href="${c.url}" target="_blank" class="sha-pill text-decoration-none">${c.sha}</a>
+          <span class="ms-2">${escapeHtml(c.message)}</span>
+        </div>
+        <small class="text-muted text-nowrap">${escapeHtml(c.author)} · ${fmtDate(c.date)}</small>
+      </div>
+    </div>`).join('');
+  document.getElementById('pendingCard').style.display = '';
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+async function doUpdate() {
+  if (updating) return;
+  if (!confirm('Pull the latest code from GitHub and re-run install.sh?\n\nThe proxymanager service will restart. The web page will be briefly unreachable.')) return;
+  updating = true;
+  const btn = document.getElementById('updateBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Updating…';
+  try {
+    const res = await fetch('/api/update', { method: 'POST' });
+    const r = await res.json();
+    if (!r.success) {
+      banner('err', 'Update failed to start: ' + (r.error || 'unknown'));
+      btn.disabled = false; btn.innerHTML = '<i class="bi bi-cloud-download me-1"></i>Update Now';
+      updating = false;
+      return;
+    }
+    banner('info', `<i class="bi bi-hourglass-split me-1"></i>${r.message} Watching for restart…`);
+    document.getElementById('logCard').style.display = '';
+    pollLog();
+    waitForRestart();
+  } catch (e) {
+    banner('err', 'Update error: ' + e);
+    btn.disabled = false; btn.innerHTML = '<i class="bi bi-cloud-download me-1"></i>Update Now';
+    updating = false;
+  }
+}
+
+async function pollLog() {
+  if (!updating) return;
+  try {
+    const res = await fetch('/api/update/log');
+    const txt = await res.text();
+    document.getElementById('logBody').textContent = txt || 'waiting for output…';
+    document.getElementById('logBody').scrollTop = document.getElementById('logBody').scrollHeight;
+  } catch (e) { /* service might be restarting */ }
+  setTimeout(pollLog, 2000);
+}
+
+async function waitForRestart() {
+  // The service will restart mid-update. Poll /api/version until the
+  // installed SHA changes (or matches remote), then reload.
+  const startSha = document.getElementById('localSha').textContent;
+  let attempts = 0;
+  while (attempts < 60) {
+    await new Promise(r => setTimeout(r, 3000));
+    attempts++;
+    try {
+      const res = await fetch('/api/version', { cache: 'no-store' });
+      if (!res.ok) continue;
+      const v = await res.json();
+      const newShort = v.local_short || '';
+      if (newShort && newShort !== startSha) {
+        banner('ok', `<i class="bi bi-check-circle me-1"></i>Updated to <code>${newShort}</code>. Reloading…`);
+        setTimeout(() => location.reload(), 1500);
+        return;
+      }
+    } catch (e) { /* service down, keep polling */ }
+  }
+  updating = false;
+  document.getElementById('updateBtn').disabled = false;
+  document.getElementById('updateBtn').innerHTML = '<i class="bi bi-cloud-download me-1"></i>Update Now';
+  banner('warn', 'Timed out waiting for restart. Check the log below or run <code>journalctl -u proxymanager -n 50</code>.');
+}
+
+async function toggleLog() {
+  const card = document.getElementById('logCard');
+  if (card.style.display === 'none') {
+    card.style.display = '';
+    try {
+      const res = await fetch('/api/update/log');
+      document.getElementById('logBody').textContent = (await res.text()) || 'no log yet';
+    } catch (e) {}
+  } else {
+    card.style.display = 'none';
+  }
+}
+
+checkVersion();
+</script>
+</body>
+</html>
