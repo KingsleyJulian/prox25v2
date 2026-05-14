@@ -7,8 +7,15 @@ echo "=== ProxyManager Installer ==="
 apt-get update -qq 2>/dev/null || apt-get update --fix-missing -qq || true
 
 # Python deps
-apt-get install -y python3 python3-pip build-essential git
-pip3 install flask pyyaml speedtest-cli
+apt-get install -y python3 python3-pip python3-venv build-essential git
+
+# Create venv (Ubuntu 24.04 forbids system-wide pip per PEP 668)
+mkdir -p /opt/proxymanager
+if [ ! -x /opt/proxymanager/venv/bin/python3 ]; then
+  python3 -m venv /opt/proxymanager/venv
+fi
+/opt/proxymanager/venv/bin/pip install --upgrade pip
+/opt/proxymanager/venv/bin/pip install flask pyyaml speedtest-cli
 
 # Build 3proxy from source (not in Ubuntu 24.04 repos)
 if ! command -v 3proxy &>/dev/null; then
