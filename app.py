@@ -1,5 +1,5 @@
 from flask import Flask, render_template, jsonify, request, Response
-import subprocess, json, os, re, yaml, uuid, random, string
+import subprocess, json, os, re, sys, yaml, uuid, random, string
 from datetime import datetime
 import ipaddress
 
@@ -41,11 +41,19 @@ def get_or_assign_tid(iface, cfg):
             return candidate
     raise RuntimeError('No free routing table IDs')
 
-def get_uplink_iface():
-    """The iface currently holding the main-table default route (Tailscale relies on it)."""
+def detect_default_uplink():
+    """Iface that physically holds the main-table default route right now."""
     out, _, _ = run(['ip', 'route', 'show', 'default'])
     m = re.search(r'default\s+via\s+\S+\s+dev\s+(\S+)', out)
     return m.group(1) if m else None
+
+def get_uplink_iface():
+    """Manual override from config wins; otherwise fall back to live default-route detection."""
+    cfg = load_cfg()
+    manual = cfg.get('uplink')
+    if manual and manual in list_nics():
+        return manual
+    return detect_default_uplink()
 
 def get_default_gateways():
     """iface -> default gateway IP (main table)."""
@@ -215,30 +223,78 @@ def api_scan():
 
 @app.route('/api/speedtest/<iface>', methods=['POST'])
 def api_speedtest(iface):
+    try:
+        if iface not in list_nics():
+            return jsonify({'success': False, 'error': 'Unknown interface'}), 400
+        cfg = load_cfg()
+        src_ip = (cfg['interfaces'].get(iface) or {}).get('ip')
+        if not src_ip:
+            live = get_iface_status().get(iface) or {}
+            src_ip = live.get('ip')
+        if not src_ip:
+            return jsonify({'success': False, 'error': 'No IP bound to interface'}), 400
+        # Invoke speedtest as a module via the same Python interpreter that's
+        # running Flask, so it works regardless of $PATH in the systemd unit.
+        cmd = [sys.executable, '-m', 'speedtest', '--source', src_ip, '--json', '--secure']
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if r.returncode != 0 or not r.stdout.strip():
+            return jsonify({
+                'success': False,
+                'error': (r.stderr or r.stdout or 'speedtest failed').strip()[:400]
+            }), 500
+        data = json.loads(r.stdout)
+        return jsonify({
+            'success':       True,
+            'download_mbps': round(data.get('download', 0) / 1_000_000, 2),
+            'upload_mbps':   round(data.get('upload', 0) / 1_000_000, 2),
+            'ping_ms':       round(data.get('ping', 0), 1),
+            'server':        (data.get('server') or {}).get('host'),
+            'isp':           (data.get('client') or {}).get('isp'),
+            'source_ip':     src_ip,
+        })
+    except subprocess.TimeoutExpired:
+        return jsonify({'success': False, 'error': 'speedtest timed out after 120s'}), 504
+    except FileNotFoundError as e:
+        return jsonify({'success': False, 'error': f'speedtest module not installed: {e}'}), 500
+    except Exception as e:
+        return jsonify({'success': False, 'error': f'{type(e).__name__}: {e}'}), 500
+
+@app.route('/api/uplink', methods=['GET'])
+def api_uplink_get():
+    cfg = load_cfg()
+    return jsonify({
+        'manual':  cfg.get('uplink'),
+        'current': detect_default_uplink(),
+        'effective': get_uplink_iface(),
+    })
+
+@app.route('/api/uplink', methods=['POST'])
+def api_uplink_set():
+    d = request.get_json(silent=True) or {}
+    iface = d.get('interface')
+    cfg = load_cfg()
+    if iface in (None, '', 'auto'):
+        # clear manual override
+        cfg.pop('uplink', None)
+        save_cfg(cfg)
+        return jsonify({'success': True, 'manual': None, 'current': detect_default_uplink()})
     if iface not in list_nics():
         return jsonify({'success': False, 'error': 'Unknown interface'}), 400
-    cfg = load_cfg()
-    src_ip = (cfg['interfaces'].get(iface) or {}).get('ip')
-    if not src_ip:
-        live = get_iface_status().get(iface) or {}
-        src_ip = live.get('ip')
-    if not src_ip:
-        return jsonify({'success': False, 'error': 'No IP bound to interface'}), 400
-    out, err, rc = run(['speedtest-cli', '--source', src_ip, '--json', '--secure'])
-    if rc != 0 or not out:
-        return jsonify({'success': False, 'error': (err or 'speedtest-cli failed')[:400]}), 500
-    try:
-        data = json.loads(out)
-    except Exception as e:
-        return jsonify({'success': False, 'error': f'parse error: {e}'}), 500
+    icfg = cfg['interfaces'].get(iface)
+    if not icfg:
+        return jsonify({'success': False, 'error': 'Configure interface first (need gateway)'}), 400
+    gw = icfg['gateway']
+    # Move the main-table default route to this iface. Tailscale will follow.
+    _, err, rc = run(['ip', 'route', 'replace', 'default', 'via', gw, 'dev', iface])
+    if rc != 0:
+        return jsonify({'success': False, 'error': f'ip route replace failed: {err}'}), 500
+    run(['ip', 'route', 'flush', 'cache'])
+    cfg['uplink'] = iface
+    save_cfg(cfg)
     return jsonify({
-        'success':       True,
-        'download_mbps': round(data.get('download', 0) / 1_000_000, 2),
-        'upload_mbps':   round(data.get('upload', 0) / 1_000_000, 2),
-        'ping_ms':       round(data.get('ping', 0), 1),
-        'server':        (data.get('server') or {}).get('host'),
-        'isp':           data.get('client', {}).get('isp'),
-        'source_ip':     src_ip,
+        'success': True,
+        'manual':  iface,
+        'current': detect_default_uplink(),
     })
 
 def get_tailscale_ip():

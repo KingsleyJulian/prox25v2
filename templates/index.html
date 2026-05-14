@@ -52,9 +52,16 @@
 
   <!-- ── INTERFACES TAB ── -->
   <div id="tab-interfaces">
-    <div class="d-flex justify-content-between align-items-center mb-3">
+    <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
       <span class="text-muted small">Configure each ISP port, then add proxy accounts to it.</span>
-      <button class="btn btn-sm btn-outline-secondary" onclick="loadStatus()"><i class="bi bi-arrow-clockwise me-1"></i>Refresh</button>
+      <div class="d-flex align-items-center gap-2">
+        <label class="text-muted small mb-0" for="uplinkSelect"><i class="bi bi-broadcast me-1"></i>Uplink:</label>
+        <select id="uplinkSelect" class="form-select form-select-sm" style="width:auto;" onchange="setUplink(this.value)">
+          <option value="auto">Auto (default route)</option>
+        </select>
+        <span id="uplinkCurrent" class="text-muted small"></span>
+        <button class="btn btn-sm btn-outline-secondary" onclick="loadStatus()"><i class="bi bi-arrow-clockwise me-1"></i>Refresh</button>
+      </div>
     </div>
     <div id="ifaceGrid" class="row g-3"></div>
   </div>
@@ -489,9 +496,43 @@ function copyStr(s) {
   toast('Copied!');
 }
 
+// ── uplink selector ──
+async function loadUplink() {
+  const res = await fetch('/api/uplink');
+  const u = await res.json();
+  const sel = document.getElementById('uplinkSelect');
+  const ifaces = Object.keys(ifaceData).sort();
+  sel.innerHTML = '<option value="auto">Auto (default route)</option>' +
+    ifaces.map(i => `<option value="${i}">${i}${ifaceData[i].cfg?.ip ? ' — '+ifaceData[i].cfg.ip : ''}</option>`).join('');
+  sel.value = u.manual || 'auto';
+  document.getElementById('uplinkCurrent').textContent = u.current ? `(active: ${u.current})` : '';
+}
+
+async function setUplink(iface) {
+  if (!confirm(iface === 'auto'
+    ? 'Clear manual uplink override? Default route will stay where it is now.'
+    : `Move the main default route to ${iface}? This will change which NIC carries Tailscale and outbound traffic.`)) {
+    loadUplink();
+    return;
+  }
+  const res = await fetch('/api/uplink', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ interface: iface })
+  });
+  const r = await res.json();
+  if (r.success) {
+    toast(`Uplink set to ${r.manual || 'auto'}`);
+    loadStatus();
+  } else {
+    toast('Failed: ' + (r.error || 'unknown'), 'danger');
+    loadUplink();
+  }
+}
+
 // ── init ──
-loadStatus();
-setInterval(loadStatus, 15000);
+loadStatus().then(loadUplink);
+setInterval(() => { loadStatus().then(loadUplink); }, 15000);
 
 // Show Tailscale banner
 (async () => {
