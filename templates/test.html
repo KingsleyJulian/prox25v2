@@ -93,14 +93,15 @@
           <th class="ps-3">Status</th>
           <th>Proxy</th>
           <th>Interface</th>
-          <th>Configured Exit</th>
-          <th>Actual Exit</th>
+          <th title="LAN IP that 3proxy binds to">Bind IP</th>
+          <th title="Public IP this NIC normally presents (from ipinfo)">Expected Public IP</th>
+          <th title="Public IP returned by api.ipify.org through the proxy">Actual Public IP</th>
           <th>Latency</th>
           <th>Download</th>
           <th class="text-end pe-3">Action</th>
         </tr></thead>
         <tbody id="tbody">
-          <tr><td colspan="8" class="text-center text-muted py-4">Loading proxies…</td></tr>
+          <tr><td colspan="9" class="text-center text-muted py-4">Loading proxies…</td></tr>
         </tbody>
       </table>
     </div>
@@ -180,7 +181,7 @@ function setFilter(v) {
 function render() {
   const tbody = document.getElementById('tbody');
   if (!proxies.length) {
-    tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted py-4">No proxy accounts on this interface</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted py-4">No proxy accounts on this interface</td></tr>';
     updateSummary();
     return;
   }
@@ -190,15 +191,22 @@ function render() {
     return statusOf(results[p.id]) === filter;
   });
   if (!visible.length) {
-    tbody.innerHTML = `<tr><td colspan="8" class="text-center text-muted py-4">No proxies match filter: <code>${filter}</code></td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="9" class="text-center text-muted py-4">No proxies match filter: <code>${filter}</code></td></tr>`;
     updateSummary();
     return;
   }
   tbody.innerHTML = visible.map(p => {
     const r = results[p.id];
-    const ipCell = r && r.actual_ip
-      ? (r.ip_match ? `<code class="text-success">${r.actual_ip}</code>` : `<code class="text-warning">${r.actual_ip}</code>`)
-      : '<span class="text-muted">—</span>';
+    const expCell = r && r.expected_public_ip
+      ? `<code class="small">${r.expected_public_ip}</code>`
+      : '<span class="text-muted small">—</span>';
+    let actualCell = '<span class="text-muted">—</span>';
+    if (r && r.actual_ip) {
+      const cls = (r.ip_match === false) ? 'text-warning'
+                : (r.ip_match === true)  ? 'text-success'
+                : 'text-info';
+      actualCell = `<code class="${cls}">${r.actual_ip}</code>`;
+    }
     const latCell = r && r.latency_ms != null
       ? `<span class="${latencyClass(r.latency_ms)}">${r.latency_ms} ms</span>`
       : '<span class="text-muted">—</span>';
@@ -212,7 +220,8 @@ function render() {
         <td><code class="small">${p.exit_ip}:${p.port}</code><div class="text-muted small">${p.username}</div></td>
         <td><code>${p.interface}</code></td>
         <td><code class="small">${p.exit_ip}</code></td>
-        <td>${ipCell}</td>
+        <td>${expCell}</td>
+        <td>${actualCell}</td>
         <td>${latCell}</td>
         <td>${dlCell}</td>
         <td class="text-end pe-3">
@@ -259,16 +268,17 @@ async function exportXlsx() {
     results: visible.map(p => {
       const r = results[p.id] || {};
       return {
-        id:            p.id,
-        port:          p.port,
-        interface:     p.interface,
-        configured_ip: p.exit_ip,
-        actual_ip:     r.actual_ip,
-        ip_match:      r.ip_match,
-        latency_ms:    r.latency_ms,
-        download_mbps: r.download_mbps,
-        success:       r.success,
-        error:         r.error,
+        id:                p.id,
+        port:              p.port,
+        interface:         p.interface,
+        configured_ip:     p.exit_ip,           // LAN bind IP
+        expected_public_ip: r.expected_public_ip,
+        actual_ip:         r.actual_ip,         // public IP from proxy
+        ip_match:          r.ip_match,
+        latency_ms:        r.latency_ms,
+        download_mbps:     r.download_mbps,
+        success:           r.success,
+        error:             r.error,
       };
     }),
   };

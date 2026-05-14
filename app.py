@@ -686,15 +686,31 @@ def delete_proxy(pid):
 
 def _test_one_proxy(p, dl_bytes=5_000_000):
     """Run exit-IP, latency, and download tests through a single SOCKS5 proxy.
-    Returns a dict with all three results plus error info."""
+    Returns a dict with all three results plus error info.
+
+    'ip_match' compares the proxy's actual *public* exit IP against the
+    *public* IP that the proxy's bound NIC normally presents (cached from
+    /api/isp). Comparing against the LAN bind IP would always be false."""
     proxy_url = f"socks5h://{p['username']}:{p['password']}@127.0.0.1:{p['port']}"
     out = {
         'id':            p['id'],
         'port':          p['port'],
         'interface':     p['interface'],
-        'configured_ip': p['exit_ip'],
+        'bind_ip':       p['exit_ip'],
+        'configured_ip': p['exit_ip'],  # kept for backwards compatibility
         'success':       False,
     }
+    # Look up the NIC's expected public IP. Use the cache; populate if missing.
+    expected_public = None
+    cached = ISP_CACHE.get(p['interface'])
+    if cached and cached.get('public_ip'):
+        expected_public = cached['public_ip']
+    else:
+        info = lookup_isp(p['interface'], p['exit_ip'])
+        if info and info.get('public_ip'):
+            expected_public = info['public_ip']
+    if expected_public:
+        out['expected_public_ip'] = expected_public
     t0 = time.time()
     try:
         # 1) Exit IP through the proxy
@@ -706,8 +722,12 @@ def _test_one_proxy(p, dl_bytes=5_000_000):
             out['error'] = (r.stderr or 'connect failed').strip()[:200]
             return out
         actual_ip = r.stdout.strip()
-        out['actual_ip']    = actual_ip
-        out['ip_match']     = (actual_ip == p['exit_ip'])
+        out['actual_ip']  = actual_ip
+        out['actual_public_ip'] = actual_ip
+        # Match only when we have a reference public IP to compare to.
+        # Without one, leave ip_match as None so the UI treats it as "ok"
+        # rather than a false-positive mismatch.
+        out['ip_match'] = (actual_ip == expected_public) if expected_public else None
 
         # 2) Latency — small request, take total time
         r = subprocess.run(
@@ -798,7 +818,7 @@ def api_test_export_xlsx():
 
     headers = [
         'Status', 'Interface', 'Host', 'Port', 'Username', 'Password',
-        'Configured Exit IP', 'Actual Exit IP', 'IP Match',
+        'Bind IP (LAN)', 'Expected Public IP', 'Actual Public IP', 'IP Match',
         'Latency (ms)', 'Download (Mbps)', 'Connection String', 'Error',
     ]
     head_font = Font(bold=True, color='FFFFFF')
@@ -837,8 +857,9 @@ def api_test_export_xlsx():
             user,
             pw,
             r.get('configured_ip') or '',
+            r.get('expected_public_ip') or '',
             r.get('actual_ip') or '',
-            'yes' if r.get('ip_match') else ('no' if r.get('ip_match') is False else ''),
+            'yes' if r.get('ip_match') else ('no' if r.get('ip_match') is False else 'n/a'),
             r.get('latency_ms') if r.get('latency_ms') is not None else '',
             r.get('download_mbps') if r.get('download_mbps') is not None else '',
             conn,
@@ -849,7 +870,7 @@ def api_test_export_xlsx():
             c.fill = fill
 
     # Auto-ish width based on header length
-    widths = [12, 12, 16, 8, 18, 18, 18, 18, 10, 14, 16, 50, 30]
+    widths = [12, 12, 16, 8, 18, 18, 18, 20, 20, 10, 14, 16, 50, 30]
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
     ws.freeze_panes = 'A2'
