@@ -211,6 +211,9 @@ function renderGrid(data) {
                 <span class="k">Routing Table</span><span class="v">${d.cfg?.table_id || '<span class=\"text-muted\">not configured</span>'}</span>
                 <span class="k">Proxies</span><span class="v">${d.proxy_count || 0}</span>
                 <span class="k">RX / TX Total</span><span class="v">${fmtBytes(d.rx_bytes)} / ${fmtBytes(d.tx_bytes)}</span>
+                <span class="k">ISP</span><span class="v" id="isp-${name}"><span class="text-muted">—</span> <button class="btn btn-link btn-sm p-0 ms-1" onclick="refreshIsp('${name}')" title="Refresh"><i class="bi bi-arrow-clockwise"></i></button></span>
+                <span class="k">Public IP</span><span class="v" id="pubip-${name}"><span class="text-muted">—</span></span>
+                <span class="k">Location</span><span class="v" id="geo-${name}"><span class="text-muted">—</span></span>
               </div>
               <div class="row mt-3 g-2" id="speed-${name}">
                 <div class="col-4"><div class="speed-box"><div class="speed-num" id="dl-${name}">—</div><div class="speed-lbl">Down Mbps</div></div></div>
@@ -245,14 +248,57 @@ async function loadScan() {
   });
   scanData = data;
   renderGrid(data);
-  // patch the live rate readouts
+  // patch the live rate readouts + restore any cached ISP info
   Object.entries(data).forEach(([name, d]) => {
     const rxEl = document.getElementById(`rx-${name}`);
     const txEl = document.getElementById(`tx-${name}`);
     if (rxEl) rxEl.textContent = fmtRate(d._rxRate);
     if (txEl) txEl.textContent = fmtRate(d._txRate);
+    if (d.isp_info) paintIsp(name, d.isp_info);
   });
   document.getElementById('lastScan').textContent = 'Updated ' + new Date().toLocaleTimeString();
+}
+
+// ── ISP info ──────────────────────────────────────────────────────────────
+function paintIsp(name, info) {
+  const ispEl = document.getElementById(`isp-${name}`);
+  const pubEl = document.getElementById(`pubip-${name}`);
+  const geoEl = document.getElementById(`geo-${name}`);
+  if (!ispEl) return;
+  const refreshBtn = `<button class="btn btn-link btn-sm p-0 ms-1" onclick="refreshIsp('${name}')" title="Refresh"><i class="bi bi-arrow-clockwise"></i></button>`;
+  if (!info || info.error) {
+    ispEl.innerHTML = `<span class="text-muted">${info?.error || '—'}</span> ${refreshBtn}`;
+    if (pubEl) pubEl.innerHTML = '<span class="text-muted">—</span>';
+    if (geoEl) geoEl.innerHTML = '<span class="text-muted">—</span>';
+    return;
+  }
+  const isp = info.isp || '<span class="text-muted">unknown</span>';
+  const asn = info.asn ? `<span class="text-muted small ms-1">${info.asn}</span>` : '';
+  ispEl.innerHTML = `${isp}${asn} ${refreshBtn}`;
+  if (pubEl) pubEl.innerHTML = info.public_ip ? `<code>${info.public_ip}</code>` : '<span class="text-muted">—</span>';
+  const loc = [info.city, info.region, info.country].filter(Boolean).join(', ');
+  if (geoEl) geoEl.innerHTML = loc || '<span class="text-muted">—</span>';
+}
+
+async function loadIspAll(force=false) {
+  const url = '/api/isp' + (force ? '?force=1' : '');
+  try {
+    const res = await fetch(url);
+    const data = await res.json();
+    Object.entries(data).forEach(([name, info]) => paintIsp(name, info));
+  } catch (e) { /* silent */ }
+}
+
+async function refreshIsp(iface) {
+  const el = document.getElementById(`isp-${iface}`);
+  if (el) el.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+  try {
+    const res = await fetch(`/api/isp?force=1&iface=${iface}`);
+    const data = await res.json();
+    paintIsp(iface, data[iface]);
+  } catch (e) {
+    toast('ISP lookup failed: ' + e, 'danger');
+  }
 }
 
 // ── set uplink ───────────────────────────────────────────────────────────
@@ -312,8 +358,10 @@ async function runSpeedTest(iface) {
   }
 }
 
-loadScan();
+loadScan().then(() => loadIspAll(false));
 setInterval(loadScan, 4000);
+// Refresh ISP info on a slower cadence; cache on the backend protects ipinfo.io
+setInterval(() => loadIspAll(false), 60000);
 </script>
 </body>
 </html>

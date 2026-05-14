@@ -1,5 +1,5 @@
 from flask import Flask, render_template, jsonify, request, Response
-import subprocess, json, os, re, sys, yaml, uuid, random, string
+import subprocess, json, os, re, sys, time, yaml, uuid, random, string
 from datetime import datetime
 import ipaddress
 
@@ -13,6 +13,10 @@ RT_TABLES     = '/etc/iproute2/rt_tables'
 SYS_NET       = '/sys/class/net'
 TABLE_MIN     = 101
 TABLE_MAX     = 249
+
+# ISP lookup cache: iface -> {ip, public_ip, isp, country, city, ts}
+ISP_CACHE = {}
+ISP_TTL   = 900   # 15 minutes — ipinfo rate-limits the free tier
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -145,6 +149,43 @@ def get_iface_details():
         result[i] = d
     return result
 
+def lookup_isp(iface, src_ip, force=False):
+    """Query ipinfo.io from a specific source IP so the request exits via that NIC's
+    policy-routed table. Cached per-iface for ISP_TTL seconds."""
+    now = time.time()
+    cached = ISP_CACHE.get(iface)
+    if not force and cached and cached.get('ip') == src_ip and (now - cached.get('ts', 0)) < ISP_TTL:
+        return cached
+    cmd = ['curl', '--interface', src_ip, '-s', '-m', '8',
+           '-H', 'Accept: application/json', 'https://ipinfo.io/json']
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        if r.returncode != 0 or not r.stdout.strip():
+            return {'ip': src_ip, 'error': (r.stderr or 'curl failed').strip()[:200], 'ts': now}
+        data = json.loads(r.stdout)
+        org = (data.get('org') or '').strip()
+        # ipinfo "org" looks like "AS15169 Google LLC" — split AS number from name
+        asn = ''
+        isp = org
+        m = re.match(r'^(AS\d+)\s+(.*)$', org)
+        if m:
+            asn, isp = m.group(1), m.group(2)
+        info = {
+            'ip':        src_ip,
+            'public_ip': data.get('ip'),
+            'isp':       isp or None,
+            'asn':       asn or None,
+            'country':   data.get('country'),
+            'region':    data.get('region'),
+            'city':      data.get('city'),
+            'hostname':  data.get('hostname'),
+            'ts':        now,
+        }
+        ISP_CACHE[iface] = info
+        return info
+    except Exception as e:
+        return {'ip': src_ip, 'error': f'{type(e).__name__}: {e}', 'ts': now}
+
 # ── netplan + routing ─────────────────────────────────────────────────────────
 
 def update_netplan(iface, ip, prefix, gateway, t):
@@ -219,7 +260,32 @@ def scan_page():
 
 @app.route('/api/scan')
 def api_scan():
-    return jsonify(get_iface_details())
+    details = get_iface_details()
+    # Attach cached ISP info if present (don't block on fresh lookups here)
+    for name, d in details.items():
+        cached = ISP_CACHE.get(name)
+        if cached and cached.get('ip') == d.get('ip'):
+            d['isp_info'] = cached
+    return jsonify(details)
+
+@app.route('/api/isp')
+def api_isp_all():
+    """Refresh-on-demand ISP info for every configured iface. Honours the cache
+    so polling is cheap. Pass ?force=1 to bypass the cache."""
+    force = request.args.get('force') == '1'
+    only  = request.args.get('iface')
+    cfg = load_cfg()
+    out = {}
+    details = get_iface_status()
+    for name in list_nics():
+        if only and name != only:
+            continue
+        ip = (cfg['interfaces'].get(name) or {}).get('ip') or (details.get(name) or {}).get('ip')
+        if not ip:
+            out[name] = {'error': 'no ip'}
+            continue
+        out[name] = lookup_isp(name, ip, force=force)
+    return jsonify(out)
 
 @app.route('/api/speedtest/<iface>', methods=['POST'])
 def api_speedtest(iface):
