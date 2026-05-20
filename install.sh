@@ -7,7 +7,7 @@ echo "=== ProxyManager Installer ==="
 apt-get update -qq 2>/dev/null || apt-get update --fix-missing -qq || true
 
 # Python deps
-apt-get install -y python3 python3-pip python3-venv build-essential git
+apt-get install -y python3 python3-pip python3-venv build-essential git libssl-dev
 
 # Create venv (Ubuntu 24.04 forbids system-wide pip per PEP 668)
 mkdir -p /opt/proxymanager
