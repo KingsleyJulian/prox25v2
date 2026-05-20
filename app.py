@@ -7,7 +7,10 @@ import ipaddress
 app = Flask(__name__)
 
 CONFIG_FILE   = '/etc/proxymanager/config.json'
-NETPLAN_FILE  = '/etc/netplan/01-netcfg.yaml'
+# Dedicated netplan file owned by ProxyManager — does NOT clobber the system's
+# installer-generated file (50-cloud-init.yaml / 00-installer-config.yaml etc).
+# Netplan merges all *.yaml files in /etc/netplan/ at apply time.
+NETPLAN_FILE  = '/etc/netplan/90-proxymanager.yaml'
 PROXY3_CFG    = '/etc/3proxy/3proxy.cfg'
 RT_TABLES     = '/etc/iproute2/rt_tables'
 
@@ -195,9 +198,29 @@ def lookup_isp(iface, src_ip, force=False):
 
 # ── netplan + routing ─────────────────────────────────────────────────────────
 
+def _load_netplan():
+    """Load our dedicated netplan file, or return a fresh skeleton."""
+    cfg = {}
+    if os.path.exists(NETPLAN_FILE):
+        try:
+            with open(NETPLAN_FILE) as f:
+                cfg = yaml.safe_load(f) or {}
+        except yaml.YAMLError:
+            cfg = {}
+    cfg.setdefault('network', {})
+    cfg['network'].setdefault('version', 2)
+    cfg['network'].setdefault('renderer', 'networkd')
+    cfg['network'].setdefault('ethernets', {})
+    return cfg
+
+def _write_netplan(cfg):
+    """Write with 0600 perms — netplan warns/errors on world-readable files."""
+    fd = os.open(NETPLAN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'w') as f:
+        yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
+
 def update_netplan(iface, ip, prefix, gateway, t):
-    with open(NETPLAN_FILE) as f:
-        cfg = yaml.safe_load(f)
+    cfg = _load_netplan()
     net = str(ipaddress.IPv4Network(f'{ip}/{prefix}', strict=False))
     cfg['network']['ethernets'][iface] = {
         'addresses': [f'{ip}/{prefix}'],
@@ -208,10 +231,18 @@ def update_netplan(iface, ip, prefix, gateway, t):
         'routing-policy': [{'from': ip, 'table': t}],
         'nameservers': {'addresses': ['8.8.8.8', '8.8.4.4']},
     }
-    with open(NETPLAN_FILE, 'w') as f:
-        yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
+    _write_netplan(cfg)
     _, err, rc = run(['netplan', 'apply'])
     return rc == 0, err
+
+def remove_from_netplan(iface):
+    if not os.path.exists(NETPLAN_FILE):
+        return
+    cfg = _load_netplan()
+    if iface in cfg['network'].get('ethernets', {}):
+        del cfg['network']['ethernets'][iface]
+        _write_netplan(cfg)
+        run(['netplan', 'apply'])
 
 def apply_policy_routing(iface, ip, gateway, t):
     tname = f'isp_{iface}'
@@ -609,6 +640,8 @@ def iface_delete(iface):
     iface_cfg = cfg['interfaces'].pop(iface, None)
     if iface_cfg:
         run(['ip', 'rule', 'del', 'from', iface_cfg['ip']])
+        if not iface_cfg.get('is_uplink'):
+            remove_from_netplan(iface)
         save_cfg(cfg)
         write_3proxy(cfg['proxies'])
         reload_3proxy()
