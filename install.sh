@@ -67,8 +67,17 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-# Systemd service for 3proxy
-cat > /etc/systemd/system/3proxy.service << 'EOF'
+# Systemd service for 3proxy — auto-detect actual binary path
+# (it may be /usr/local/bin/3proxy from a source build, /usr/bin/3proxy if it
+# came from a package, or somewhere else entirely)
+THREEPROXY_BIN=$(command -v 3proxy)
+if [ -z "$THREEPROXY_BIN" ]; then
+  echo "ERROR: 3proxy binary not found in PATH after install step" >&2
+  exit 1
+fi
+echo "Using 3proxy binary at: $THREEPROXY_BIN"
+
+cat > /etc/systemd/system/3proxy.service << EOF
 [Unit]
 Description=3proxy Proxy Server
 After=network.target
@@ -76,7 +85,7 @@ After=network.target
 [Service]
 Type=simple
 User=root
-ExecStart=/usr/local/bin/3proxy /etc/3proxy/3proxy.cfg
+ExecStart=$THREEPROXY_BIN /etc/3proxy/3proxy.cfg
 Restart=always
 RestartSec=5
 
