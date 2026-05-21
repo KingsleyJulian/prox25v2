@@ -286,6 +286,74 @@ def write_3proxy(proxies):
 def reload_3proxy():
     run(['systemctl', 'restart', '3proxy'])
 
+# ── auto-sync: reconcile config with live NIC state ───────────────────────────
+# Background loop that detects when an interface's IP changes (DHCP renewal,
+# cable moved to a new network, USB adapter re-plugged) and rewrites the
+# proxy exit_ip + policy-routing rules to match. Without this, a stale exit_ip
+# in 3proxy.cfg causes every outbound bind to fail with EADDRNOTAVAIL.
+
+SYNC_LOCK = threading.Lock()
+SYNC_INTERVAL = int(os.environ.get('PROXYMANAGER_SYNC_INTERVAL', '15'))
+
+def reconcile_iface(iface, cfg):
+    """Make cfg['interfaces'][iface] match live NIC state. Returns True if changed."""
+    if iface not in cfg.get('interfaces', {}):
+        return False
+    live = get_iface_status().get(iface)
+    if not live or not live.get('ip'):
+        return False  # NIC gone or no IP yet — leave config alone, user may re-plug
+
+    iface_cfg = cfg['interfaces'][iface]
+    cur_ip   = iface_cfg.get('ip')
+    cur_gw   = iface_cfg.get('gateway')
+    live_ip  = live['ip']
+    live_gw  = live.get('gateway') or cur_gw
+    live_pfx = int(live.get('prefix') or iface_cfg.get('prefix', 24))
+
+    if live_ip == cur_ip and live_gw == cur_gw and live_pfx == iface_cfg.get('prefix'):
+        return False
+
+    # Drift detected — re-install policy routing with the new source IP
+    t = iface_cfg.get('table_id') or get_or_assign_tid(iface, cfg)
+    if cur_ip and cur_ip != live_ip:
+        run(['ip', 'rule', 'del', 'from', cur_ip])
+    apply_policy_routing(iface, live_ip, live_gw, t)
+
+    iface_cfg['ip']      = live_ip
+    iface_cfg['gateway'] = live_gw
+    iface_cfg['prefix']  = live_pfx
+    for p in cfg.get('proxies', []):
+        if p['interface'] == iface:
+            p['exit_ip'] = live_ip
+
+    print(f"[sync] {iface}: {cur_ip} -> {live_ip}", file=sys.stderr, flush=True)
+    return True
+
+def sync_all():
+    """One reconciliation pass. Returns True if any change was applied."""
+    with SYNC_LOCK:
+        cfg = load_cfg()
+        changed = False
+        for iface in list(cfg.get('interfaces', {}).keys()):
+            try:
+                if reconcile_iface(iface, cfg):
+                    changed = True
+            except Exception as e:
+                print(f"[sync] {iface}: {e}", file=sys.stderr, flush=True)
+        if changed:
+            save_cfg(cfg)
+            write_3proxy(cfg['proxies'])
+            reload_3proxy()
+        return changed
+
+def sync_loop():
+    while True:
+        try:
+            sync_all()
+        except Exception as e:
+            print(f"[sync_loop] {e}", file=sys.stderr, flush=True)
+        time.sleep(SYNC_INTERVAL)
+
 # ── routes ────────────────────────────────────────────────────────────────────
 
 @app.route('/')
@@ -598,7 +666,16 @@ def api_status():
         data['cfg']        = cfg['interfaces'].get(iface)
         data['proxy_count']= counts.get(iface, 0)
         data['is_uplink']  = (iface == uplink)
+        # Surface IP drift to the UI so a banner can be shown
+        if data['cfg'] and data.get('ip') and data['cfg'].get('ip'):
+            data['ip_drift'] = (data['ip'] != data['cfg']['ip'])
     return jsonify(live)
+
+@app.route('/api/sync', methods=['POST'])
+def api_sync():
+    """Force a reconciliation pass (normally runs every SYNC_INTERVAL seconds)."""
+    changed = sync_all()
+    return jsonify({'changed': changed})
 
 @app.route('/api/interface/setup', methods=['POST'])
 def iface_setup():
@@ -949,4 +1026,7 @@ if __name__ == '__main__':
     # Pre-warm ISP cache in a background thread so /scan shows location
     # without waiting on the first page open.
     threading.Thread(target=warm_isp_cache, daemon=True).start()
+    # Background sync: detect IP drift (DHCP renewal, USB re-plug, etc.) and
+    # auto-update exit_ip + policy routing so proxies don't go stale.
+    threading.Thread(target=sync_loop, daemon=True, name='sync_loop').start()
     app.run(host='0.0.0.0', port=8080, debug=False)
