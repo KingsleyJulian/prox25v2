@@ -94,10 +94,28 @@ def save_cfg(cfg):
     with open(CONFIG_FILE, 'w') as f:
         json.dump(cfg, f, indent=2)
 
+def _pick_best_address(addresses, gateway):
+    """From multiple addresses on one iface, prefer the one whose subnet contains
+    the gateway. This avoids the cross-subnet trap (e.g. NIC has 192.168.70.10/24
+    + leftover 192.168.28.11/24, gateway is 192.168.70.1 → pick the .70.10)."""
+    if not addresses:
+        return None, None
+    if gateway:
+        try:
+            gw_addr = ipaddress.IPv4Address(gateway)
+            for a in addresses:
+                net = ipaddress.IPv4Network(f"{a['ip']}/{a['prefix']}", strict=False)
+                if gw_addr in net:
+                    return a['ip'], a['prefix']
+        except (ValueError, ipaddress.AddressValueError):
+            pass
+    # No gateway match — first IP is usually the DHCP-assigned one
+    return addresses[0]['ip'], addresses[0]['prefix']
+
 def get_iface_status():
     nics = list_nics()
     out, _, _ = run(['ip', 'addr', 'show'])
-    result = {i: {'name': i, 'connected': False, 'ip': None, 'prefix': None} for i in nics}
+    result = {i: {'name': i, 'connected': False, 'ip': None, 'prefix': None, 'addresses': []} for i in nics}
     cur = None
     for line in out.splitlines():
         m = re.match(r'^\d+: (\S+?)[@:]', line)
@@ -108,12 +126,33 @@ def get_iface_status():
         elif cur in result:
             ip_m = re.search(r'inet (\d+\.\d+\.\d+\.\d+)/(\d+)', line)
             if ip_m:
-                result[cur]['ip']     = ip_m.group(1)
-                result[cur]['prefix'] = ip_m.group(2)
+                result[cur]['addresses'].append({
+                    'ip': ip_m.group(1),
+                    'prefix': int(ip_m.group(2)),
+                })
     gws = get_default_gateways()
     for iface, data in result.items():
         data['gateway'] = gws.get(iface)
+        data['ip'], data['prefix'] = _pick_best_address(data['addresses'], data['gateway'])
     return result
+
+def derive_live_config(iface):
+    """Build a complete {ip, prefix, gateway} from live NIC state.
+    Returns None if iface has no usable IP yet."""
+    status = get_iface_status().get(iface)
+    if not status or not status['ip']:
+        return None
+    ip, prefix = status['ip'], status['prefix']
+    gw = status.get('gateway')
+    # If no default route is bound to this iface, derive .1 of the IP's subnet
+    # as a best-guess gateway. Most home/office networks use .1.
+    if not gw:
+        try:
+            net = ipaddress.IPv4Network(f"{ip}/{prefix}", strict=False)
+            gw = str(next(net.hosts()))
+        except (ValueError, StopIteration):
+            return None
+    return {'ip': ip, 'prefix': prefix, 'gateway': gw}
 
 def _read_sys(path, cast=str):
     try:
@@ -296,37 +335,53 @@ SYNC_LOCK = threading.Lock()
 SYNC_INTERVAL = int(os.environ.get('PROXYMANAGER_SYNC_INTERVAL', '15'))
 
 def reconcile_iface(iface, cfg):
-    """Make cfg['interfaces'][iface] match live NIC state. Returns True if changed."""
+    """Make cfg['interfaces'][iface] match live NIC state. Returns True if changed.
+
+    Uses derive_live_config() which picks the address whose subnet matches the
+    iface's actual default-route gateway — so a NIC with both DHCP and a stale
+    static IP gets reconciled to the working one, not the dead one."""
     if iface not in cfg.get('interfaces', {}):
         return False
-    live = get_iface_status().get(iface)
-    if not live or not live.get('ip'):
+    live = derive_live_config(iface)
+    if not live:
         return False  # NIC gone or no IP yet — leave config alone, user may re-plug
 
     iface_cfg = cfg['interfaces'][iface]
     cur_ip   = iface_cfg.get('ip')
     cur_gw   = iface_cfg.get('gateway')
-    live_ip  = live['ip']
-    live_gw  = live.get('gateway') or cur_gw
-    live_pfx = int(live.get('prefix') or iface_cfg.get('prefix', 24))
+    cur_pfx  = iface_cfg.get('prefix')
 
-    if live_ip == cur_ip and live_gw == cur_gw and live_pfx == iface_cfg.get('prefix'):
+    # Auto-heal: if current ip/gateway are on different subnets, that's
+    # unreachable — force reconciliation regardless of "drift" check.
+    cross_subnet = False
+    if cur_ip and cur_gw and cur_pfx:
+        try:
+            net = ipaddress.IPv4Network(f"{cur_ip}/{cur_pfx}", strict=False)
+            if ipaddress.IPv4Address(cur_gw) not in net:
+                cross_subnet = True
+        except (ValueError, ipaddress.AddressValueError):
+            cross_subnet = True
+
+    if (live['ip'] == cur_ip and live['gateway'] == cur_gw
+            and live['prefix'] == cur_pfx and not cross_subnet):
         return False
 
-    # Drift detected — re-install policy routing with the new source IP
+    # Drift (or cross-subnet) detected — re-install policy routing with live IP
     t = iface_cfg.get('table_id') or get_or_assign_tid(iface, cfg)
-    if cur_ip and cur_ip != live_ip:
+    if cur_ip and cur_ip != live['ip']:
         run(['ip', 'rule', 'del', 'from', cur_ip])
-    apply_policy_routing(iface, live_ip, live_gw, t)
+    apply_policy_routing(iface, live['ip'], live['gateway'], t)
 
-    iface_cfg['ip']      = live_ip
-    iface_cfg['gateway'] = live_gw
-    iface_cfg['prefix']  = live_pfx
+    iface_cfg['ip']      = live['ip']
+    iface_cfg['gateway'] = live['gateway']
+    iface_cfg['prefix']  = live['prefix']
     for p in cfg.get('proxies', []):
         if p['interface'] == iface:
-            p['exit_ip'] = live_ip
+            p['exit_ip'] = live['ip']
 
-    print(f"[sync] {iface}: {cur_ip} -> {live_ip}", file=sys.stderr, flush=True)
+    reason = 'cross-subnet auto-heal' if cross_subnet else 'drift'
+    print(f"[sync] {iface} ({reason}): {cur_ip}/{cur_gw} -> {live['ip']}/{live['gateway']}",
+          file=sys.stderr, flush=True)
     return True
 
 def sync_all():
@@ -678,21 +733,35 @@ def api_sync():
     return jsonify({'changed': changed})
 
 @app.route('/api/interface/setup', methods=['POST'])
-def iface_setup():
-    d      = request.json
-    iface  = d['interface']
-    ip     = d['ip']
-    prefix = str(d['prefix'])
-    gw     = d['gateway']
+def _configure_iface(iface, ip=None, prefix=None, gw=None, auto=False):
+    """Core setup logic — used by both /api/interface/setup and /api/autoconfig-all.
+    If `auto` is True OR fields are missing OR ip/gw are on different subnets,
+    derive everything from live NIC state. Returns a result dict."""
     if iface not in list_nics():
-        return jsonify({'success': False, 'error': 'Unknown interface'}), 400
-    cfg     = load_cfg()
-    t       = get_or_assign_tid(iface, cfg)
-    uplink  = (iface == get_uplink_iface())
-    errors  = []
-    # Skip netplan rewrite for the uplink — its config is owned by whatever
-    # currently provides the default route (DHCP / existing static), and we
-    # don't want to risk dropping Tailscale's path.
+        return {'success': False, 'error': 'Unknown interface'}, 400
+
+    prefix = str(prefix) if prefix else ''
+    needs_auto = auto or not ip or not gw or not prefix
+    if not needs_auto:
+        try:
+            net = ipaddress.IPv4Network(f"{ip}/{prefix}", strict=False)
+            if ipaddress.IPv4Address(gw) not in net:
+                needs_auto = True   # cross-subnet IP+gateway → auto-correct
+        except (ValueError, ipaddress.AddressValueError):
+            needs_auto = True
+    if needs_auto:
+        live = derive_live_config(iface)
+        if not live:
+            return {
+                'success': False,
+                'error': f'{iface} has no IP yet — plug in a cable / wait for DHCP, then retry.',
+            }, 400
+        ip, prefix, gw = live['ip'], str(live['prefix']), live['gateway']
+
+    cfg    = load_cfg()
+    t      = get_or_assign_tid(iface, cfg)
+    uplink = (iface == get_uplink_iface())
+    errors = []
     if not uplink:
         ok, err = update_netplan(iface, ip, prefix, gw, t)
         if not ok:
@@ -702,14 +771,45 @@ def iface_setup():
         'ip': ip, 'prefix': int(prefix), 'gateway': gw,
         'table_id': t, 'is_uplink': uplink,
     }
-    # update exit_ip on existing proxies for this interface
     for p in cfg['proxies']:
         if p['interface'] == iface:
             p['exit_ip'] = ip
     save_cfg(cfg)
     write_3proxy(cfg['proxies'])
     reload_3proxy()
-    return jsonify({'success': len(errors) == 0, 'errors': errors})
+    return {
+        'success': len(errors) == 0,
+        'errors': errors,
+        'applied': {'ip': ip, 'prefix': int(prefix), 'gateway': gw},
+        'auto_corrected': needs_auto,
+    }, 200
+
+def iface_setup():
+    d = request.json or {}
+    res, code = _configure_iface(
+        iface=d.get('interface'),
+        ip=d.get('ip'),
+        prefix=d.get('prefix'),
+        gw=d.get('gateway'),
+        auto=bool(d.get('auto', False)),
+    )
+    return jsonify(res), code
+
+@app.route('/api/autoconfig-all', methods=['POST'])
+def api_autoconfig_all():
+    """One-click setup for fresh installs: configure every connected NIC from
+    its live state, no manual input needed."""
+    results = {}
+    for iface in list_nics():
+        if not derive_live_config(iface):
+            results[iface] = {'skipped': 'no IP / not connected'}
+            continue
+        try:
+            res, _ = _configure_iface(iface, auto=True)
+            results[iface] = res
+        except Exception as e:
+            results[iface] = {'error': str(e)}
+    return jsonify({'results': results})
 
 @app.route('/api/interface/<iface>', methods=['DELETE'])
 def iface_delete(iface):
@@ -1015,7 +1115,23 @@ if __name__ == '__main__':
     # then restore policy routing + regenerate 3proxy config
     for _iface in list_nics():
         run(['ip', 'link', 'set', _iface, 'up'])
+    # Give DHCP a moment so newly-upped NICs have IPs before autoconfig runs
+    time.sleep(2)
     _cfg = load_cfg()
+    # First-run autoconfig: if no interfaces have ever been configured, set up
+    # every connected NIC from live state automatically. Makes "install on a
+    # new box" a zero-click experience.
+    if not _cfg.get('interfaces'):
+        print('[startup] no interfaces configured — auto-detecting from live state',
+              file=sys.stderr, flush=True)
+        for _iface in list_nics():
+            if derive_live_config(_iface):
+                try:
+                    res, _ = _configure_iface(_iface, auto=True)
+                    print(f'[startup] {_iface}: {res}', file=sys.stderr, flush=True)
+                except Exception as e:
+                    print(f'[startup] {_iface}: {e}', file=sys.stderr, flush=True)
+        _cfg = load_cfg()  # reload after autoconfig writes
     for _iface, _icfg in _cfg.get('interfaces', {}).items():
         _t = _icfg.get('table_id') or get_or_assign_tid(_iface, _cfg)
         apply_policy_routing(_iface, _icfg['ip'], _icfg['gateway'], _t)

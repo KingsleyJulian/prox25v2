@@ -56,7 +56,12 @@
   <div id="tab-interfaces">
     <div class="d-flex justify-content-between align-items-center mb-3">
       <span class="text-muted small">Configure each ISP port, then add proxy accounts to it. <a href="/scan" class="text-info">Switch uplink →</a></span>
-      <button class="btn btn-sm btn-outline-secondary" onclick="loadStatus()"><i class="bi bi-arrow-clockwise me-1"></i>Refresh</button>
+      <div class="d-flex gap-2">
+        <button class="btn btn-sm btn-success" onclick="autoConfigureAll()" title="Detect every connected NIC and configure it from its live IP/gateway">
+          <i class="bi bi-magic me-1"></i>Auto-Configure All
+        </button>
+        <button class="btn btn-sm btn-outline-secondary" onclick="loadStatus()"><i class="bi bi-arrow-clockwise me-1"></i>Refresh</button>
+      </div>
     </div>
     <div id="ifaceGrid" class="row g-3"></div>
   </div>
@@ -287,6 +292,7 @@ function renderIfaces(data) {
               <button class="btn btn-sm btn-primary flex-fill" onclick="openIfaceModal('${iface}')">
                 <i class="bi bi-gear me-1"></i>${configured ? 'Edit' : 'Configure'}
               </button>
+              ${connected ? `<button class="btn btn-sm btn-outline-success" onclick="autoConfigureOne('${iface}')" title="Auto-configure from live state"><i class="bi bi-magic"></i></button>` : ''}
               ${configured ? `<button class="btn btn-sm btn-outline-primary" onclick="quickAddProxy('${iface}')"><i class="bi bi-plus-lg"></i></button>` : ''}
               ${configured ? `<button class="btn btn-sm btn-outline-danger" onclick="removeIface('${iface}')"><i class="bi bi-trash"></i></button>` : ''}
             </div>
@@ -294,6 +300,37 @@ function renderIfaces(data) {
         </div>
       </div>`;
   });
+}
+
+// ── auto-configure ──
+async function autoConfigureAll() {
+  if (!confirm('Detect every connected NIC and (re-)configure it from its live IP/gateway?\n\nThis is safe — it won\'t change the uplink\'s network settings.')) return;
+  toast('Auto-configuring…');
+  const res = await fetch('/api/autoconfig-all', {method:'POST'});
+  const r = await res.json();
+  const lines = Object.entries(r.results || {}).map(([k,v]) => {
+    if (v.skipped)        return `${k}: skipped (${v.skipped})`;
+    if (v.error)          return `${k}: error (${v.error})`;
+    if (v.applied)        return `${k}: ${v.applied.ip}/${v.applied.prefix} via ${v.applied.gateway}`;
+    return `${k}: ${JSON.stringify(v)}`;
+  });
+  toast(lines.join('<br>') || 'No NICs detected', 'success');
+  loadStatus();
+}
+
+async function autoConfigureOne(iface) {
+  const res = await fetch('/api/interface/setup', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({interface: iface, auto: true})
+  });
+  const r = await res.json();
+  if (r.success) {
+    toast(`${iface}: ${r.applied.ip}/${r.applied.prefix} via ${r.applied.gateway}`);
+    loadStatus();
+  } else {
+    toast(r.error || 'Failed', 'danger');
+  }
 }
 
 // ── interface modal ──
