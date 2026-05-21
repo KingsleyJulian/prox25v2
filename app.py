@@ -265,9 +265,21 @@ def _write_netplan(cfg):
         yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
 
 def update_netplan(iface, ip, prefix, gateway, t):
+    """Write the iface's static config to netplan under the right section.
+    Wireless ifaces go under `wifis:` (preserving any existing access-points
+    so the AP association doesn't get wiped). Ethernet ifaces go under
+    `ethernets:`."""
     cfg = _load_netplan()
     net = str(ipaddress.IPv4Network(f'{ip}/{prefix}', strict=False))
-    cfg['network']['ethernets'][iface] = {
+    section = 'wifis' if is_wireless(iface) else 'ethernets'
+    cfg['network'].setdefault(section, {})
+
+    # If a wireless iface already has an access-points block from the WiFi
+    # connect flow, preserve it — otherwise the iface drops its WiFi.
+    existing = cfg['network'][section].get(iface, {})
+    access_points = existing.get('access-points')
+
+    iface_block = {
         'addresses': [f'{ip}/{prefix}'],
         'routes': [
             {'to': 'default', 'via': gateway, 'metric': t, 'table': t},
@@ -276,16 +288,52 @@ def update_netplan(iface, ip, prefix, gateway, t):
         'routing-policy': [{'from': ip, 'table': t}],
         'nameservers': {'addresses': ['8.8.8.8', '8.8.4.4']},
     }
+    if section == 'wifis' and access_points:
+        iface_block['access-points'] = access_points
+
+    cfg['network'][section][iface] = iface_block
+    # Make sure the iface isn't also lingering in the wrong section
+    other = 'ethernets' if section == 'wifis' else 'wifis'
+    if iface in cfg['network'].get(other, {}):
+        del cfg['network'][other][iface]
+        if not cfg['network'][other]:
+            del cfg['network'][other]
+
     _write_netplan(cfg)
     _, err, rc = run(['netplan', 'apply'])
     return rc == 0, err
 
 def remove_from_netplan(iface):
+    """Remove the iface's static-IP/routing config from netplan.
+    For wireless ifaces, the access-points block is kept so the WiFi
+    association survives (otherwise the iface would lose its connection)."""
     if not os.path.exists(NETPLAN_FILE):
         return
     cfg = _load_netplan()
+    changed = False
+
     if iface in cfg['network'].get('ethernets', {}):
         del cfg['network']['ethernets'][iface]
+        if not cfg['network']['ethernets']:
+            del cfg['network']['ethernets']
+        changed = True
+
+    if iface in cfg['network'].get('wifis', {}):
+        wifi_block = cfg['network']['wifis'][iface]
+        access_points = wifi_block.get('access-points')
+        if access_points:
+            # Keep just the WiFi association, strip the rest
+            cfg['network']['wifis'][iface] = {
+                'dhcp4': True,
+                'access-points': access_points,
+            }
+        else:
+            del cfg['network']['wifis'][iface]
+            if not cfg['network']['wifis']:
+                del cfg['network']['wifis']
+        changed = True
+
+    if changed:
         _write_netplan(cfg)
         run(['netplan', 'apply'])
 
