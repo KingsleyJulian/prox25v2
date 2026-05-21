@@ -62,10 +62,23 @@ def get_or_assign_tid(iface, cfg):
     raise RuntimeError('No free routing table IDs')
 
 def detect_default_uplink():
-    """Iface that physically holds the main-table default route right now."""
+    """Iface owning the LOWEST-metric default route — the one the kernel
+    actually prefers for new outbound connections. With multi-NIC DHCP, several
+    ifaces can each install a default route in the main table; just picking the
+    first line of `ip route show default` is unreliable (order depends on lease
+    timing, not preference). Lowest metric wins, matching the kernel."""
     out, _, _ = run(['ip', 'route', 'show', 'default'])
-    m = re.search(r'default\s+via\s+\S+\s+dev\s+(\S+)', out)
-    return m.group(1) if m else None
+    best = None  # (metric, iface)
+    for line in out.splitlines():
+        m = re.search(r'default\s+via\s+\S+\s+dev\s+(\S+)', line)
+        if not m:
+            continue
+        iface = m.group(1)
+        metric_m = re.search(r'\bmetric\s+(\d+)', line)
+        metric = int(metric_m.group(1)) if metric_m else 0
+        if best is None or metric < best[0]:
+            best = (metric, iface)
+    return best[1] if best else None
 
 def get_uplink_iface():
     """Manual override from config wins; otherwise fall back to live default-route detection."""
@@ -169,6 +182,9 @@ def try_dhcp(iface, timeout=10):
     # Bring iface up first — dhclient won't fight for a leased lease on a
     # down link. Idempotent if already up.
     run(['ip', 'link', 'set', iface, 'up'])
+    # Capture which iface owns the real uplink BEFORE we add another default
+    # route, so we don't accidentally identify our own new route as "the uplink"
+    pre_uplink = detect_default_uplink()
     # -1 = one-shot (don't keep retrying forever on no-server networks)
     # -v = verbose (helps journal debugging)
     # Use a wall-clock timeout on the subprocess as a hard backstop.
@@ -181,6 +197,12 @@ def try_dhcp(iface, timeout=10):
         run(['pkill', '-f', f'dhclient.*{iface}'])  # clean up any zombie
     except FileNotFoundError:
         return False  # dhclient not installed — shouldn't happen on Ubuntu
+    # dhclient also installs a default route. For secondary proxy NICs that
+    # would compete with the real uplink (potentially stealing Tailscale's
+    # path), strip our new route — policy routing already handles outbound
+    # from this iface's source IP via its per-iface table.
+    if pre_uplink and pre_uplink != iface:
+        run(['ip', 'route', 'del', 'default', 'dev', iface])
     # Poll for the lease to register in `ip addr`
     deadline = time.time() + 3
     while time.time() < deadline:
