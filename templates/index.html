@@ -554,26 +554,35 @@ function fillFromSuggestion(iface) {
 async function submitIfaceSetup() {
   const sp = document.getElementById('ifaceSpinner');
   sp.classList.remove('d-none');
-  const res = await fetch('/api/interface/setup', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({
-      interface: document.getElementById('ifaceModalIface').value,
-      ip:        document.getElementById('ifaceIp').value,
-      prefix:    document.getElementById('ifacePrefix').value,
-      gateway:   document.getElementById('ifaceGw').value,
-    })
-  });
+  let r;
+  try {
+    const res = await fetch('/api/interface/setup', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        interface: document.getElementById('ifaceModalIface').value,
+        ip:        document.getElementById('ifaceIp').value,
+        prefix:    document.getElementById('ifacePrefix').value,
+        gateway:   document.getElementById('ifaceGw').value,
+      })
+    });
+    r = await res.json();
+  } catch (e) {
+    sp.classList.add('d-none');
+    const al = document.getElementById('ifaceAlert');
+    al.className = 'alert alert-danger small p-2';
+    al.textContent = 'Request failed: ' + e.message;
+    return;
+  }
   sp.classList.add('d-none');
-  const r = await res.json();
   if (r.success) {
     bootstrap.Modal.getInstance(document.getElementById('ifaceModal')).hide();
-    toast('Interface configured!');
+    toast(r.applied ? `Configured ${r.applied.ip}/${r.applied.prefix} via ${r.applied.gateway}` : 'Interface configured!');
     loadStatus();
   } else {
     const al = document.getElementById('ifaceAlert');
     al.className = 'alert alert-danger small p-2';
-    al.textContent = r.errors?.join('; ') || 'Failed';
+    al.textContent = r.error || r.errors?.join('; ') || 'Apply failed (no error returned)';
   }
 }
 

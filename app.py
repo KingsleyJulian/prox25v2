@@ -316,6 +316,21 @@ def _write_netplan(cfg):
     with os.fdopen(fd, 'w') as f:
         yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
 
+def _netplan_apply(timeout=30):
+    """Run 'netplan apply' with a wall-clock timeout.
+    netplan apply can hang for various reasons (networkd-wait-online, DHCP
+    teardown, USB device re-enumeration) — without a timeout, the whole HTTP
+    request blocks forever and the UI's Apply button spins until the user
+    gives up. Returns (ok, err)."""
+    try:
+        r = subprocess.run(['netplan', 'apply'],
+                           capture_output=True, text=True, timeout=timeout)
+        return r.returncode == 0, (r.stderr or r.stdout or '').strip()
+    except subprocess.TimeoutExpired:
+        return False, f'netplan apply timed out after {timeout}s'
+    except FileNotFoundError:
+        return False, 'netplan command not found'
+
 def update_netplan(iface, ip, prefix, gateway, t):
     """Write the iface's static config to netplan under the right section.
     Wireless ifaces go under `wifis:` (preserving any existing access-points
@@ -352,8 +367,7 @@ def update_netplan(iface, ip, prefix, gateway, t):
             del cfg['network'][other]
 
     _write_netplan(cfg)
-    _, err, rc = run(['netplan', 'apply'])
-    return rc == 0, err
+    return _netplan_apply()
 
 def remove_from_netplan(iface):
     """Remove the iface's static-IP/routing config from netplan.
@@ -387,7 +401,7 @@ def remove_from_netplan(iface):
 
     if changed:
         _write_netplan(cfg)
-        run(['netplan', 'apply'])
+        _netplan_apply()
 
 def apply_policy_routing(iface, ip, gateway, t):
     tname = f'isp_{iface}'
@@ -926,8 +940,8 @@ def api_wifi_connect(iface):
         'access-points': {ssid: ap_cfg},
     }
     _write_netplan(np)
-    _, err, rc = run(['netplan', 'apply'])
-    if rc != 0:
+    ok, err = _netplan_apply(timeout=45)   # wifi association can be slower
+    if not ok:
         return jsonify({'success': False, 'error': err}), 500
     # Give wpa_supplicant a moment to associate and DHCP to lease
     time.sleep(4)
@@ -946,7 +960,7 @@ def api_wifi_disconnect(iface):
         if not np['network']['wifis']:
             del np['network']['wifis']
         _write_netplan(np)
-        run(['netplan', 'apply'])
+        _netplan_apply()
     return jsonify({'success': True})
 
 @app.route('/api/sync', methods=['POST'])
