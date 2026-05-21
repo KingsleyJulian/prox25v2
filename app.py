@@ -160,6 +160,36 @@ def derive_live_config(iface):
             return None
     return {'ip': ip, 'prefix': prefix, 'gateway': gw}
 
+def try_dhcp(iface, timeout=10):
+    """Best-effort one-shot DHCP lease on iface. Returns True if an IP
+    appeared on the iface within the timeout. Skips wireless ifaces (those
+    go through the WiFi modal which handles association first)."""
+    if is_wireless(iface):
+        return False
+    # Bring iface up first — dhclient won't fight for a leased lease on a
+    # down link. Idempotent if already up.
+    run(['ip', 'link', 'set', iface, 'up'])
+    # -1 = one-shot (don't keep retrying forever on no-server networks)
+    # -v = verbose (helps journal debugging)
+    # Use a wall-clock timeout on the subprocess as a hard backstop.
+    try:
+        subprocess.run(
+            ['dhclient', '-1', '-v', iface],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        run(['pkill', '-f', f'dhclient.*{iface}'])  # clean up any zombie
+    except FileNotFoundError:
+        return False  # dhclient not installed — shouldn't happen on Ubuntu
+    # Poll for the lease to register in `ip addr`
+    deadline = time.time() + 3
+    while time.time() < deadline:
+        s = get_iface_status().get(iface)
+        if s and s.get('ip'):
+            return True
+        time.sleep(0.3)
+    return False
+
 def _read_sys(path, cast=str):
     try:
         with open(path) as f:
@@ -903,6 +933,21 @@ def api_sync():
     changed = sync_all()
     return jsonify({'changed': changed})
 
+@app.route('/api/interface/<iface>/dhcp', methods=['POST'])
+def api_iface_dhcp(iface):
+    """Try a one-shot DHCP lease for the given iface. Used by the UI when an
+    iface has carrier but no IP."""
+    if iface not in list_nics():
+        return jsonify({'success': False, 'error': 'Unknown interface'}), 400
+    if is_wireless(iface):
+        return jsonify({'success': False, 'error': 'wireless — use the WiFi button instead'}), 400
+    status = get_iface_status().get(iface, {})
+    if not status.get('connected'):
+        return jsonify({'success': False, 'error': 'no carrier — plug in a cable'}), 400
+    got = try_dhcp(iface)
+    live = derive_live_config(iface) if got else None
+    return jsonify({'success': got, 'live': live})
+
 @app.route('/api/interface/setup', methods=['POST'])
 def _configure_iface(iface, ip=None, prefix=None, gw=None, auto=False):
     """Core setup logic — used by both /api/interface/setup and /api/autoconfig-all.
@@ -923,9 +968,19 @@ def _configure_iface(iface, ip=None, prefix=None, gw=None, auto=False):
     if needs_auto:
         live = derive_live_config(iface)
         if not live:
+            # No IP yet — if the iface has carrier, try a one-shot DHCP lease
+            status = get_iface_status().get(iface, {})
+            if status.get('connected') and not is_wireless(iface):
+                if try_dhcp(iface):
+                    live = derive_live_config(iface)
+        if not live:
+            status = get_iface_status().get(iface, {})
+            hint = 'no carrier — plug in a cable' if not status.get('connected') \
+                else ('use the WiFi button to connect first' if is_wireless(iface)
+                      else 'DHCP found no lease on this network')
             return {
                 'success': False,
-                'error': f'{iface} has no IP yet — plug in a cable / wait for DHCP, then retry.',
+                'error': f'{iface}: {hint}',
             }, 400
         ip, prefix, gw = live['ip'], str(live['prefix']), live['gateway']
 

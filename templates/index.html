@@ -509,6 +509,9 @@ function openIfaceModal(iface) {
   document.getElementById('ifaceGw').value              = gw;
   const al = document.getElementById('ifaceAlert');
   const parts = [];
+  if (!d.ip && !d.suggested && d.connected && !d.wireless) {
+    parts.push(`<div class="small"><i class="bi bi-exclamation-triangle me-1"></i>No IP detected on <code>${iface}</code>. <a href="#" onclick="tryDhcp('${iface}'); return false;">Try DHCP →</a></div>`);
+  }
   if (d.suggested && (!d.cfg || d.cfg.ip !== d.suggested.ip || d.cfg.gateway !== d.suggested.gateway)) {
     const guessed = !d.gateway ? ' <span class="text-warning">(gateway guessed — .1 of subnet)</span>' : '';
     parts.push(`<div class="small"><i class="bi bi-magic me-1"></i>Auto-detected: <code>${d.suggested.ip}/${d.suggested.prefix}</code> via <code>${d.suggested.gateway}</code>${guessed} <a href="#" onclick="fillFromSuggestion('${iface}'); return false;" class="ms-2">Use these</a></div>`);
@@ -523,6 +526,21 @@ function openIfaceModal(iface) {
     al.className = 'd-none';
   }
   new bootstrap.Modal(document.getElementById('ifaceModal')).show();
+}
+
+async function tryDhcp(iface) {
+  toast(`Running DHCP on ${iface}…`);
+  const res = await fetch(`/api/interface/${iface}/dhcp`, {method: 'POST'});
+  const r = await res.json();
+  if (r.success && r.live) {
+    toast(`${iface}: ${r.live.ip}/${r.live.prefix} via ${r.live.gateway}`);
+    document.getElementById('ifaceIp').value     = r.live.ip;
+    document.getElementById('ifacePrefix').value = r.live.prefix;
+    document.getElementById('ifaceGw').value     = r.live.gateway;
+    loadStatus();
+  } else {
+    toast(r.error || 'DHCP failed', 'danger');
+  }
 }
 
 function fillFromSuggestion(iface) {
