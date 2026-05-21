@@ -498,19 +498,39 @@ async function autoConfigureOne(iface) {
 // ── interface modal ──
 function openIfaceModal(iface) {
   const d = ifaceData[iface] || {};
-  document.getElementById('ifaceModalIface').value = iface;
+  // Fall-through priority: saved config → live state → derived suggestion (.1 of subnet)
+  const ip     = d.cfg?.ip      || d.ip      || d.suggested?.ip      || '';
+  const prefix = d.cfg?.prefix  || d.prefix  || d.suggested?.prefix  || 24;
+  const gw     = d.cfg?.gateway || d.gateway || d.suggested?.gateway || '';
+  document.getElementById('ifaceModalIface').value      = iface;
   document.getElementById('ifaceModalName').textContent = iface;
-  document.getElementById('ifaceIp').value     = d.cfg?.ip || d.ip || '';
-  document.getElementById('ifacePrefix').value = d.cfg?.prefix || d.prefix || 24;
-  document.getElementById('ifaceGw').value     = d.cfg?.gateway || d.gateway || '';
+  document.getElementById('ifaceIp').value              = ip;
+  document.getElementById('ifacePrefix').value          = prefix;
+  document.getElementById('ifaceGw').value              = gw;
   const al = document.getElementById('ifaceAlert');
+  const parts = [];
+  if (d.suggested && (!d.cfg || d.cfg.ip !== d.suggested.ip || d.cfg.gateway !== d.suggested.gateway)) {
+    const guessed = !d.gateway ? ' <span class="text-warning">(gateway guessed — .1 of subnet)</span>' : '';
+    parts.push(`<div class="small"><i class="bi bi-magic me-1"></i>Auto-detected: <code>${d.suggested.ip}/${d.suggested.prefix}</code> via <code>${d.suggested.gateway}</code>${guessed} <a href="#" onclick="fillFromSuggestion('${iface}'); return false;" class="ms-2">Use these</a></div>`);
+  }
   if (d.is_uplink) {
+    parts.push('<div class="mt-1"><i class="bi bi-info-circle me-1"></i><strong>Uplink interface:</strong> netplan will not be modified. Only policy-routing rules will be added so this NIC can act as a proxy exit while Tailscale keeps using its default route.</div>');
+  }
+  if (parts.length) {
     al.className = 'alert alert-info small p-2';
-    al.innerHTML = '<i class="bi bi-info-circle me-1"></i><strong>Uplink interface:</strong> netplan will not be modified. Only policy-routing rules will be added so this NIC can act as a proxy exit while Tailscale keeps using its default route.';
+    al.innerHTML = parts.join('');
   } else {
     al.className = 'd-none';
   }
   new bootstrap.Modal(document.getElementById('ifaceModal')).show();
+}
+
+function fillFromSuggestion(iface) {
+  const d = ifaceData[iface] || {};
+  if (!d.suggested) return;
+  document.getElementById('ifaceIp').value     = d.suggested.ip;
+  document.getElementById('ifacePrefix').value = d.suggested.prefix;
+  document.getElementById('ifaceGw').value     = d.suggested.gateway;
 }
 
 async function submitIfaceSetup() {

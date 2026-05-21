@@ -778,6 +778,12 @@ def api_status():
         data['wireless']   = is_wireless(iface)
         if data['wireless']:
             data['wifi_ssid'] = get_wifi_ssid(iface)
+        # Suggested {ip, prefix, gateway} for the Configure modal to auto-fill.
+        # Uses derive_live_config() which falls back to .1 of the subnet when
+        # no default-route gateway is currently bound to the iface.
+        suggested = derive_live_config(iface)
+        if suggested:
+            data['suggested'] = suggested
         # Surface IP drift to the UI so a banner can be shown
         if data['cfg'] and data.get('ip') and data['cfg'].get('ip'):
             data['ip_drift'] = (data['ip'] != data['cfg']['ip'])
