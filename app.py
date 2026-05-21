@@ -35,7 +35,8 @@ def run(cmd):
     return r.stdout.strip(), r.stderr.strip(), r.returncode
 
 def list_nics():
-    """Physical ethernet interfaces — anything in /sys/class/net with a backing device."""
+    """Physical interfaces — anything in /sys/class/net with a backing device.
+    Includes both ethernet (enp*/enx*/eno*) and wireless (wl*) NICs."""
     try:
         return sorted(
             i for i in os.listdir(SYS_NET)
@@ -43,6 +44,11 @@ def list_nics():
         )
     except FileNotFoundError:
         return []
+
+def is_wireless(iface):
+    """True if the interface is a WiFi adapter (has /sys/class/net/<iface>/wireless or phy80211)."""
+    return (os.path.exists(f'{SYS_NET}/{iface}/wireless') or
+            os.path.exists(f'{SYS_NET}/{iface}/phy80211'))
 
 def get_or_assign_tid(iface, cfg):
     table_ids = cfg.setdefault('table_ids', {})
@@ -721,10 +727,121 @@ def api_status():
         data['cfg']        = cfg['interfaces'].get(iface)
         data['proxy_count']= counts.get(iface, 0)
         data['is_uplink']  = (iface == uplink)
+        data['wireless']   = is_wireless(iface)
+        if data['wireless']:
+            data['wifi_ssid'] = get_wifi_ssid(iface)
         # Surface IP drift to the UI so a banner can be shown
         if data['cfg'] and data.get('ip') and data['cfg'].get('ip'):
             data['ip_drift'] = (data['ip'] != data['cfg']['ip'])
     return jsonify(live)
+
+# ── WiFi (wireless) management ────────────────────────────────────────────────
+
+def get_wifi_ssid(iface):
+    """Currently-associated SSID, or None if not connected."""
+    out, _, rc = run(['iw', 'dev', iface, 'link'])
+    if rc != 0:
+        return None
+    m = re.search(r'SSID:\s*(.+)$', out, re.MULTILINE)
+    return m.group(1).strip() if m else None
+
+def parse_iw_scan(text):
+    """Parse `iw dev <iface> scan` output → list of {ssid, bssid, signal, security, channel}."""
+    nets = []
+    cur = None
+    for line in text.splitlines():
+        m = re.match(r'^BSS\s+([0-9a-f:]+)', line)
+        if m:
+            if cur and cur.get('ssid'):
+                nets.append(cur)
+            cur = {'bssid': m.group(1), 'ssid': None, 'signal': None,
+                   'security': 'Open', 'channel': None}
+            continue
+        if cur is None:
+            continue
+        s = line.strip()
+        if s.startswith('signal:'):
+            sm = re.search(r'(-?\d+\.\d+)', s)
+            if sm:
+                cur['signal'] = float(sm.group(1))
+        elif s.startswith('SSID:'):
+            cur['ssid'] = s.split(':', 1)[1].strip()
+        elif s.startswith('DS Parameter set: channel'):
+            ch = re.search(r'channel\s+(\d+)', s)
+            if ch:
+                cur['channel'] = int(ch.group(1))
+        elif s.startswith('RSN:'):
+            cur['security'] = 'WPA2/3'
+        elif s.startswith('WPA:') and cur['security'] == 'Open':
+            cur['security'] = 'WPA'
+    if cur and cur.get('ssid'):
+        nets.append(cur)
+    # Dedupe by SSID, keep strongest signal
+    by_ssid = {}
+    for n in nets:
+        if not n['ssid']:
+            continue
+        prev = by_ssid.get(n['ssid'])
+        if prev is None or (n['signal'] or -200) > (prev['signal'] or -200):
+            by_ssid[n['ssid']] = n
+    return sorted(by_ssid.values(), key=lambda x: x['signal'] or -200, reverse=True)
+
+@app.route('/api/wifi/<iface>/scan')
+def api_wifi_scan(iface):
+    if iface not in list_nics() or not is_wireless(iface):
+        return jsonify({'error': f'{iface} is not a wireless interface'}), 400
+    # Iface must be UP for `iw scan` to work
+    run(['ip', 'link', 'set', iface, 'up'])
+    out, err, rc = run(['iw', 'dev', iface, 'scan'])
+    if rc != 0:
+        # If scan is throttled (RTNETLINK answers: Device or resource busy),
+        # fall back to last cached results which `iw` exposes via `scan dump`.
+        out2, _, rc2 = run(['iw', 'dev', iface, 'scan', 'dump'])
+        if rc2 == 0:
+            return jsonify({'networks': parse_iw_scan(out2), 'cached': True})
+        return jsonify({'error': err or 'scan failed', 'networks': []}), 500
+    return jsonify({'networks': parse_iw_scan(out), 'cached': False})
+
+@app.route('/api/wifi/<iface>/connect', methods=['POST'])
+def api_wifi_connect(iface):
+    if iface not in list_nics() or not is_wireless(iface):
+        return jsonify({'error': f'{iface} is not a wireless interface'}), 400
+    d = request.json or {}
+    ssid = d.get('ssid')
+    password = d.get('password', '')
+    if not ssid:
+        return jsonify({'error': 'ssid is required'}), 400
+
+    np = _load_netplan()
+    np['network'].setdefault('wifis', {})
+    ap_cfg = {'password': password} if password else {}
+    np['network']['wifis'][iface] = {
+        'dhcp4': True,
+        'access-points': {ssid: ap_cfg},
+    }
+    _write_netplan(np)
+    _, err, rc = run(['netplan', 'apply'])
+    if rc != 0:
+        return jsonify({'success': False, 'error': err}), 500
+    # Give wpa_supplicant a moment to associate and DHCP to lease
+    time.sleep(4)
+    return jsonify({
+        'success': True,
+        'ssid': ssid,
+        'associated_ssid': get_wifi_ssid(iface),
+        'live': derive_live_config(iface),
+    })
+
+@app.route('/api/wifi/<iface>/disconnect', methods=['POST'])
+def api_wifi_disconnect(iface):
+    np = _load_netplan()
+    if iface in np['network'].get('wifis', {}):
+        del np['network']['wifis'][iface]
+        if not np['network']['wifis']:
+            del np['network']['wifis']
+        _write_netplan(np)
+        run(['netplan', 'apply'])
+    return jsonify({'success': True})
 
 @app.route('/api/sync', methods=['POST'])
 def api_sync():

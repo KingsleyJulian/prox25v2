@@ -104,6 +104,52 @@
   </div>
 </div>
 
+<!-- ── WIFI MODAL ── -->
+<div class="modal fade" id="wifiModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered modal-lg">
+    <div class="modal-content" style="background:#161b22; border-color:#30363d;">
+      <div class="modal-header" style="border-color:#30363d;">
+        <h6 class="modal-title"><i class="bi bi-wifi text-warning me-2"></i>Connect <span id="wifiIfaceName" class="text-primary"></span> to a network</h6>
+        <button class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="d-flex gap-2 mb-2 align-items-center">
+          <button class="btn btn-sm btn-outline-secondary" onclick="scanWifi()"><i class="bi bi-arrow-clockwise me-1"></i>Scan</button>
+          <span id="wifiScanStatus" class="text-muted small"></span>
+          <button class="btn btn-sm btn-outline-danger ms-auto" onclick="disconnectWifi()" title="Forget current WiFi"><i class="bi bi-wifi-off me-1"></i>Disconnect</button>
+        </div>
+        <div class="table-responsive" style="max-height:280px; overflow-y:auto; border:1px solid #30363d; border-radius:4px;">
+          <table class="table table-sm table-hover mb-0">
+            <thead><tr><th class="ps-3">SSID</th><th>Signal</th><th>Security</th><th>Ch</th></tr></thead>
+            <tbody id="wifiList">
+              <tr><td colspan="4" class="text-muted text-center py-3">Click Scan to discover networks</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <hr style="border-color:#30363d;">
+        <div class="row">
+          <div class="col-7">
+            <label class="form-label small">SSID</label>
+            <input type="text" class="form-control" id="wifiSsid" placeholder="Network name">
+          </div>
+          <div class="col-5">
+            <label class="form-label small">Password <span id="wifiPwHint" class="text-muted"></span></label>
+            <input type="password" class="form-control" id="wifiPassword" placeholder="leave blank for open network">
+          </div>
+        </div>
+        <div id="wifiAlert" class="d-none mt-3"></div>
+      </div>
+      <div class="modal-footer" style="border-color:#30363d;">
+        <button class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button class="btn btn-sm btn-warning" onclick="submitWifiConnect()">
+          <span id="wifiSpinner" class="spinner-border spinner-border-sm me-1 d-none"></span>
+          <i class="bi bi-wifi me-1"></i>Connect
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- ── INTERFACE SETUP MODAL ── -->
 <div class="modal fade" id="ifaceModal" tabindex="-1">
   <div class="modal-dialog modal-dialog-centered">
@@ -283,12 +329,15 @@ function renderIfaces(data) {
                 <h6 class="mb-0 text-white">${iface}</h6>
                 ${isUplink ? '<span class="badge bg-info badge-iface" title="Holds the main default route — Tailscale uses this">Uplink</span>' : ''}
               </div>
+              ${d.wireless ? '<span class="badge bg-warning text-dark badge-iface" title="Wireless interface"><i class="bi bi-wifi"></i></span>' : ''}
               <span class="badge bg-${badge} badge-iface">${status}</span>
             </div>
-            <div class="small text-muted mb-1"><i class="bi bi-ethernet me-1"></i>${ip ? ip + '/' + (d.cfg?.prefix || d.prefix || 24) : '—'}</div>
+            <div class="small text-muted mb-1"><i class="bi bi-${d.wireless ? 'wifi' : 'ethernet'} me-1"></i>${ip ? ip + '/' + (d.cfg?.prefix || d.prefix || 24) : '—'}</div>
             <div class="small text-muted mb-1"><i class="bi bi-arrow-right me-1"></i>GW: ${d.cfg?.gateway || '—'}</div>
+            ${d.wireless && d.wifi_ssid ? `<div class="small text-muted mb-1"><i class="bi bi-broadcast me-1"></i>SSID: <span class="text-info">${d.wifi_ssid}</span></div>` : ''}
             <div class="small mb-3"><i class="bi bi-shield-lock me-1 text-primary"></i><span class="text-white">${count}</span> <span class="text-muted">proxy account${count !== 1 ? 's' : ''}</span></div>
-            <div class="d-flex gap-2">
+            <div class="d-flex gap-2 flex-wrap">
+              ${d.wireless ? `<button class="btn btn-sm btn-warning flex-fill" onclick="openWifiModal('${iface}')"><i class="bi bi-wifi me-1"></i>WiFi</button>` : ''}
               <button class="btn btn-sm btn-primary flex-fill" onclick="openIfaceModal('${iface}')">
                 <i class="bi bi-gear me-1"></i>${configured ? 'Edit' : 'Configure'}
               </button>
@@ -300,6 +349,119 @@ function renderIfaces(data) {
         </div>
       </div>`;
   });
+}
+
+// ── WiFi ──
+let _wifiIface = null;
+
+function openWifiModal(iface) {
+  _wifiIface = iface;
+  document.getElementById('wifiIfaceName').textContent = iface;
+  document.getElementById('wifiSsid').value = ifaceData[iface]?.wifi_ssid || '';
+  document.getElementById('wifiPassword').value = '';
+  document.getElementById('wifiPwHint').textContent = '';
+  document.getElementById('wifiAlert').className = 'd-none';
+  document.getElementById('wifiList').innerHTML = '<tr><td colspan="4" class="text-muted text-center py-3">Scanning…</td></tr>';
+  document.getElementById('wifiScanStatus').textContent = '';
+  new bootstrap.Modal(document.getElementById('wifiModal')).show();
+  scanWifi();
+}
+
+async function scanWifi() {
+  if (!_wifiIface) return;
+  document.getElementById('wifiScanStatus').textContent = 'Scanning…';
+  document.getElementById('wifiList').innerHTML = '<tr><td colspan="4" class="text-muted text-center py-3">Scanning… (can take 5–10s)</td></tr>';
+  const res = await fetch(`/api/wifi/${_wifiIface}/scan`);
+  const r = await res.json();
+  if (r.error) {
+    document.getElementById('wifiList').innerHTML = `<tr><td colspan="4" class="text-danger text-center py-3">${r.error}</td></tr>`;
+    document.getElementById('wifiScanStatus').textContent = '';
+    return;
+  }
+  const nets = r.networks || [];
+  document.getElementById('wifiScanStatus').textContent = `${nets.length} network${nets.length !== 1 ? 's' : ''}${r.cached ? ' (cached)' : ''}`;
+  if (!nets.length) {
+    document.getElementById('wifiList').innerHTML = '<tr><td colspan="4" class="text-muted text-center py-3">No networks found</td></tr>';
+    return;
+  }
+  document.getElementById('wifiList').innerHTML = nets.map(n => `
+    <tr style="cursor:pointer;" onclick="selectWifi(${JSON.stringify(n.ssid).replace(/"/g, '&quot;')}, '${n.security}')">
+      <td class="ps-3">${escapeHtml(n.ssid)}${n.security !== 'Open' ? ' <i class="bi bi-lock-fill text-muted ms-1" style="font-size:.75rem;"></i>' : ''}</td>
+      <td><span class="${signalClass(n.signal)}">${n.signal != null ? Math.round(n.signal) + ' dBm' : '—'}</span></td>
+      <td><span class="badge bg-secondary">${n.security}</span></td>
+      <td class="text-muted">${n.channel || '—'}</td>
+    </tr>
+  `).join('');
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
+}
+
+function signalClass(s) {
+  if (s == null) return 'text-muted';
+  if (s > -60) return 'text-success';
+  if (s > -75) return 'text-warning';
+  return 'text-danger';
+}
+
+function selectWifi(ssid, security) {
+  document.getElementById('wifiSsid').value = ssid;
+  const pwField = document.getElementById('wifiPassword');
+  if (security === 'Open') {
+    pwField.value = '';
+    pwField.disabled = true;
+    document.getElementById('wifiPwHint').textContent = '(none — open network)';
+  } else {
+    pwField.disabled = false;
+    document.getElementById('wifiPwHint').textContent = '';
+    pwField.focus();
+  }
+}
+
+async function submitWifiConnect() {
+  if (!_wifiIface) return;
+  const ssid = document.getElementById('wifiSsid').value.trim();
+  const password = document.getElementById('wifiPassword').value;
+  if (!ssid) {
+    const al = document.getElementById('wifiAlert');
+    al.className = 'alert alert-danger small p-2';
+    al.textContent = 'Enter an SSID';
+    return;
+  }
+  const sp = document.getElementById('wifiSpinner');
+  sp.classList.remove('d-none');
+  const res = await fetch(`/api/wifi/${_wifiIface}/connect`, {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ssid, password}),
+  });
+  sp.classList.add('d-none');
+  const r = await res.json();
+  if (r.success) {
+    bootstrap.Modal.getInstance(document.getElementById('wifiModal')).hide();
+    if (r.live) {
+      toast(`Connected to ${ssid} — ${r.live.ip}`);
+    } else if (r.associated_ssid) {
+      toast(`Associated with ${r.associated_ssid} — waiting for DHCP…`);
+    } else {
+      toast(`Connecting to ${ssid}…`, 'warning');
+    }
+    setTimeout(loadStatus, 2000);
+  } else {
+    const al = document.getElementById('wifiAlert');
+    al.className = 'alert alert-danger small p-2';
+    al.textContent = r.error || 'Failed';
+  }
+}
+
+async function disconnectWifi() {
+  if (!_wifiIface) return;
+  if (!confirm(`Forget WiFi config for ${_wifiIface}?`)) return;
+  await fetch(`/api/wifi/${_wifiIface}/disconnect`, {method: 'POST'});
+  bootstrap.Modal.getInstance(document.getElementById('wifiModal')).hide();
+  toast('Disconnected', 'warning');
+  loadStatus();
 }
 
 // ── auto-configure ──

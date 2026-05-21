@@ -6,8 +6,10 @@ echo "=== ProxyManager Installer ==="
 # Fix any broken apt repos silently
 apt-get update -qq 2>/dev/null || apt-get update --fix-missing -qq || true
 
-# Python deps
-apt-get install -y python3 python3-pip python3-venv build-essential git libssl-dev
+# Python deps + 3proxy build deps + WiFi tooling
+# (libssl-dev for 3proxy authradius; iw + wpasupplicant for wlo*/wlp* NICs)
+apt-get install -y python3 python3-pip python3-venv build-essential git \
+                   libssl-dev iw wpasupplicant
 
 # Create venv (Ubuntu 24.04 forbids system-wide pip per PEP 668)
 mkdir -p /opt/proxymanager
