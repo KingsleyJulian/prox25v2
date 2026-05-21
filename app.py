@@ -1160,8 +1160,10 @@ IP_CHECK_URLS = [
     'https://api.ipify.org',
     'https://icanhazip.com',
     'https://ifconfig.me/ip',
-    'https://api.my-ip.io/ip',
 ]
+# Bound the worst-case per-proxy test to ~30s so the browser doesn't give up
+# and the parallel test-all pool stays responsive. If a service is slow, move
+# to the next one rather than burning more retries on it.
 
 def _curl_proxy(proxy_url, target, m=12, attempts=2, extra_args=None):
     """Run curl through a proxy with automatic retries on transient failures.
@@ -1215,26 +1217,29 @@ def _test_one_proxy(p, dl_bytes=5_000_000):
         out['expected_public_ip'] = expected_public
     t0 = time.time()
 
-    # 1) Exit IP — rotate through services, 2 attempts each
+    # 1) Exit IP — rotate through services, 1 attempt each (3 services × 8s = 24s
+    #    worst case if all fail). Trying a different service is more useful than
+    #    retrying the same one; if one's blocked the next probably isn't.
     actual_ip = None
     last_err = ''
     for url in IP_CHECK_URLS:
-        result, err = _curl_proxy(proxy_url, url, m=12, attempts=2)
+        result, err = _curl_proxy(proxy_url, url, m=8, attempts=1)
         if result:
             actual_ip = result
             break
         last_err = err
     if not actual_ip:
         out['error'] = last_err or 'connect failed (all IP services exhausted)'
+        out['elapsed_ms'] = round((time.time() - t0) * 1000)
         return out
 
     out['actual_ip']        = actual_ip
     out['actual_public_ip'] = actual_ip
     out['ip_match'] = (actual_ip == expected_public) if expected_public else None
 
-    # 2) Latency — best effort, won't fail the test if it can't measure
+    # 2) Latency — best effort
     result, _ = _curl_proxy(proxy_url, 'https://www.cloudflare.com/cdn-cgi/trace',
-                            m=10, attempts=2,
+                            m=8, attempts=1,
                             extra_args=['-o', '/dev/null', '-w', '%{time_total}'])
     if result:
         try:

@@ -306,11 +306,21 @@ async function exportXlsx() {
 async function testOne(pid) {
   results[pid] = { pending: true };
   render();
+  let r;
   try {
-    const r = await fetch(`/api/proxies/${pid}/test`, { method: 'POST' });
+    r = await fetch(`/api/proxies/${pid}/test`, { method: 'POST' });
+  } catch (e) {
+    results[pid] = { success: false, error: 'network: ' + e.message };
+    render(); return;
+  }
+  try {
     results[pid] = await r.json();
   } catch (e) {
-    results[pid] = { success: false, error: String(e) };
+    const text = await r.text().catch(() => '');
+    results[pid] = {
+      success: false,
+      error: r.ok ? 'invalid JSON response' : `HTTP ${r.status}: ${text.slice(0, 200) || r.statusText}`,
+    };
   }
   render();
 }
@@ -332,12 +342,19 @@ async function testAll() {
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({ interface: iface || null }),
     });
-    const data = await res.json();
-    (data.results || []).forEach(r => { results[r.id] = r; });
-    const ok = (data.results || []).filter(r => r.success).length;
-    toast(`Tested ${data.results.length} proxies — ${ok} working`, ok === data.results.length ? 'success' : 'warning');
+    let data;
+    try {
+      data = await res.json();
+    } catch (e) {
+      const text = await res.text().catch(() => '');
+      throw new Error(res.ok ? 'invalid JSON response' : `HTTP ${res.status}: ${text.slice(0, 200) || res.statusText}`);
+    }
+    const items = Array.isArray(data && data.results) ? data.results : [];
+    items.forEach(r => { if (r && r.id) results[r.id] = r; });
+    const ok = items.filter(r => r && r.success).length;
+    toast(`Tested ${items.length} proxies — ${ok} working`, ok === items.length ? 'success' : 'warning');
   } catch (e) {
-    toast('Test failed: ' + e, 'danger');
+    toast('Test failed: ' + (e.message || e), 'danger');
   } finally {
     testing = false;
     btn.disabled = false;
