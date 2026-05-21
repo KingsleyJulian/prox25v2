@@ -1156,23 +1156,53 @@ def delete_proxy(pid):
     reload_3proxy()
     return jsonify({'success': True})
 
+IP_CHECK_URLS = [
+    'https://api.ipify.org',
+    'https://icanhazip.com',
+    'https://ifconfig.me/ip',
+    'https://api.my-ip.io/ip',
+]
+
+def _curl_proxy(proxy_url, target, m=12, attempts=2, extra_args=None):
+    """Run curl through a proxy with automatic retries on transient failures.
+    Returns (stdout, last_err). stdout is None if every attempt failed."""
+    args = ['curl', '-s', '-m', str(m), '-x', proxy_url]
+    if extra_args:
+        args += list(extra_args)
+    args.append(target)
+    last_err = ''
+    for i in range(attempts):
+        try:
+            r = subprocess.run(args, capture_output=True, text=True, timeout=m + 3)
+            if r.returncode == 0 and r.stdout.strip():
+                return r.stdout.strip(), None
+            last_err = (r.stderr or 'empty response').strip()[:200]
+        except subprocess.TimeoutExpired:
+            last_err = 'process timeout'
+        # Brief backoff before retry — gives DNS cache time to populate
+        # and any transient 3proxy/upstream hiccups time to clear
+        if i < attempts - 1:
+            time.sleep(0.4)
+    return None, last_err
+
 def _test_one_proxy(p, dl_bytes=5_000_000):
     """Run exit-IP, latency, and download tests through a single SOCKS5 proxy.
-    Returns a dict with all three results plus error info.
 
-    'ip_match' compares the proxy's actual *public* exit IP against the
-    *public* IP that the proxy's bound NIC normally presents (cached from
-    /api/isp). Comparing against the LAN bind IP would always be false."""
+    Each curl call retries up to 2× per target, and the exit-IP check rotates
+    through a list of public-IP services as fallback — so a single flaky
+    upstream or transient DNS cache miss no longer makes the whole test fail.
+    Latency and download remain best-effort; their failure doesn't mark the
+    overall test as failed since IP-check success already proves the proxy
+    works."""
     proxy_url = f"socks5h://{p['username']}:{p['password']}@127.0.0.1:{p['port']}"
     out = {
         'id':            p['id'],
         'port':          p['port'],
         'interface':     p['interface'],
         'bind_ip':       p['exit_ip'],
-        'configured_ip': p['exit_ip'],  # kept for backwards compatibility
+        'configured_ip': p['exit_ip'],
         'success':       False,
     }
-    # Look up the NIC's expected public IP. Use the cache; populate if missing.
     expected_public = None
     cached = ISP_CACHE.get(p['interface'])
     if cached and cached.get('public_ip'):
@@ -1184,60 +1214,50 @@ def _test_one_proxy(p, dl_bytes=5_000_000):
     if expected_public:
         out['expected_public_ip'] = expected_public
     t0 = time.time()
-    try:
-        # 1) Exit IP through the proxy
-        r = subprocess.run(
-            ['curl', '-s', '-m', '12', '-x', proxy_url, 'https://api.ipify.org'],
-            capture_output=True, text=True, timeout=15,
-        )
-        if r.returncode != 0 or not r.stdout.strip():
-            out['error'] = (r.stderr or 'connect failed').strip()[:200]
-            return out
-        actual_ip = r.stdout.strip()
-        out['actual_ip']  = actual_ip
-        out['actual_public_ip'] = actual_ip
-        # Match only when we have a reference public IP to compare to.
-        # Without one, leave ip_match as None so the UI treats it as "ok"
-        # rather than a false-positive mismatch.
-        out['ip_match'] = (actual_ip == expected_public) if expected_public else None
 
-        # 2) Latency — small request, take total time
-        r = subprocess.run(
-            ['curl', '-s', '-m', '10', '-x', proxy_url, '-o', '/dev/null',
-             '-w', '%{time_total}',
-             'https://www.cloudflare.com/cdn-cgi/trace'],
-            capture_output=True, text=True, timeout=12,
-        )
-        if r.returncode == 0 and r.stdout.strip():
-            try:
-                out['latency_ms'] = round(float(r.stdout.strip()) * 1000)
-            except ValueError:
-                pass
+    # 1) Exit IP — rotate through services, 2 attempts each
+    actual_ip = None
+    last_err = ''
+    for url in IP_CHECK_URLS:
+        result, err = _curl_proxy(proxy_url, url, m=12, attempts=2)
+        if result:
+            actual_ip = result
+            break
+        last_err = err
+    if not actual_ip:
+        out['error'] = last_err or 'connect failed (all IP services exhausted)'
+        return out
 
-        # 3) Download speed — pulls dl_bytes from Cloudflare speedtest endpoint
-        r = subprocess.run(
-            ['curl', '-s', '-m', '30', '-x', proxy_url, '-o', '/dev/null',
-             '-w', '%{speed_download}',
-             f'https://speed.cloudflare.com/__down?bytes={dl_bytes}'],
-            capture_output=True, text=True, timeout=35,
-        )
-        if r.returncode == 0 and r.stdout.strip():
-            try:
-                bps = float(r.stdout.strip())
-                out['download_mbps'] = round(bps * 8 / 1_000_000, 2)
-                out['download_bytes'] = dl_bytes
-            except ValueError:
-                pass
+    out['actual_ip']        = actual_ip
+    out['actual_public_ip'] = actual_ip
+    out['ip_match'] = (actual_ip == expected_public) if expected_public else None
 
-        out['success']    = True
-        out['elapsed_ms'] = round((time.time() - t0) * 1000)
-        return out
-    except subprocess.TimeoutExpired:
-        out['error'] = 'timeout'
-        return out
-    except Exception as e:
-        out['error'] = f'{type(e).__name__}: {e}'
-        return out
+    # 2) Latency — best effort, won't fail the test if it can't measure
+    result, _ = _curl_proxy(proxy_url, 'https://www.cloudflare.com/cdn-cgi/trace',
+                            m=10, attempts=2,
+                            extra_args=['-o', '/dev/null', '-w', '%{time_total}'])
+    if result:
+        try:
+            out['latency_ms'] = round(float(result) * 1000)
+        except ValueError:
+            pass
+
+    # 3) Download speed — best effort
+    result, _ = _curl_proxy(proxy_url,
+                            f'https://speed.cloudflare.com/__down?bytes={dl_bytes}',
+                            m=30, attempts=1,
+                            extra_args=['-o', '/dev/null', '-w', '%{speed_download}'])
+    if result:
+        try:
+            bps = float(result)
+            out['download_mbps']  = round(bps * 8 / 1_000_000, 2)
+            out['download_bytes'] = dl_bytes
+        except ValueError:
+            pass
+
+    out['success']    = True
+    out['elapsed_ms'] = round((time.time() - t0) * 1000)
+    return out
 
 @app.route('/api/proxies/<pid>/test', methods=['POST'])
 def api_test_proxy(pid):
