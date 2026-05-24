@@ -1,10 +1,24 @@
 from flask import Flask, render_template, jsonify, request, Response
-import subprocess, json, os, re, sys, time, yaml, uuid, random, string, threading
+from werkzeug.exceptions import HTTPException
+import subprocess, json, os, re, sys, time, yaml, uuid, random, string, threading, traceback
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import ipaddress
 
 app = Flask(__name__)
+
+@app.errorhandler(Exception)
+def _handle_uncaught(e):
+    """Make /api/* routes always return JSON, even on unexpected exceptions.
+    Without this Flask returns an HTML 500 page, which the frontend can't
+    parse ('Unexpected token <'). The full traceback goes to the journal."""
+    if isinstance(e, HTTPException):
+        return e  # 404/405/etc keep their normal behavior
+    tb = traceback.format_exc()
+    print(f'[api-error] {request.method} {request.path}\n{tb}', file=sys.stderr, flush=True)
+    if request.path.startswith('/api/'):
+        return jsonify({'success': False, 'error': f'{type(e).__name__}: {e}'}), 500
+    raise e
 
 CONFIG_FILE   = '/etc/proxymanager/config.json'
 # Dedicated netplan file owned by ProxyManager — does NOT clobber the system's
@@ -103,15 +117,39 @@ def rand_pass(n=12):
     return ''.join(random.choices(chars, k=n))
 
 def load_cfg():
+    default = {'interfaces': {}, 'proxies': [], 'next_port': 10001}
     if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE) as f:
-            return json.load(f)
-    return {'interfaces': {}, 'proxies': [], 'next_port': 10001}
+        try:
+            with open(CONFIG_FILE) as f:
+                cfg = json.load(f)
+        except (json.JSONDecodeError, ValueError) as e:
+            # Corrupt/truncated (e.g. an earlier write was interrupted). Back it
+            # up so we don't lose data, then start clean rather than 500ing.
+            bak = CONFIG_FILE + '.corrupt'
+            try:
+                os.replace(CONFIG_FILE, bak)
+            except OSError:
+                pass
+            print(f'[load_cfg] corrupt config backed up to {bak}: {e}',
+                  file=sys.stderr, flush=True)
+            return dict(default)
+        # Ensure required keys exist even if an older/partial file is missing them
+        cfg.setdefault('interfaces', {})
+        cfg.setdefault('proxies', [])
+        cfg.setdefault('next_port', 10001)
+        return cfg
+    return dict(default)
 
 def save_cfg(cfg):
+    """Atomic write — write to a temp file then rename, so an interrupted write
+    can never leave a half-written (unparseable) config.json behind."""
     os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
-    with open(CONFIG_FILE, 'w') as f:
+    tmp = CONFIG_FILE + '.tmp'
+    with open(tmp, 'w') as f:
         json.dump(cfg, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, CONFIG_FILE)
 
 def _pick_best_address(addresses, gateway):
     """From multiple addresses on one iface, prefer the one whose subnet contains
