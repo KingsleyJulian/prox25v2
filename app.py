@@ -1022,7 +1022,6 @@ def api_iface_dhcp(iface):
     live = derive_live_config(iface) if got else None
     return jsonify({'success': got, 'live': live})
 
-@app.route('/api/interface/setup', methods=['POST'])
 def _configure_iface(iface, ip=None, prefix=None, gw=None, auto=False):
     """Core setup logic — used by both /api/interface/setup and /api/autoconfig-all.
     If `auto` is True OR fields are missing OR ip/gw are on different subnets,
@@ -1084,8 +1083,11 @@ def _configure_iface(iface, ip=None, prefix=None, gw=None, auto=False):
         'auto_corrected': needs_auto,
     }, 200
 
+@app.route('/api/interface/setup', methods=['POST'])
 def iface_setup():
     d = request.json or {}
+    if not d.get('interface'):
+        return jsonify({'success': False, 'error': 'interface is required'}), 400
     res, code = _configure_iface(
         iface=d.get('interface'),
         ip=d.get('ip'),
