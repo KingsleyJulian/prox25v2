@@ -885,6 +885,38 @@ def get_public_ipv6():
             continue
     return None
 
+def iface_global_ipv6(iface):
+    """The first globally-routable IPv6 on a specific iface, or None.
+    This is the per-router check: does the router on THIS NIC hand out a
+    public (2000::/3) IPv6 via SLAAC/DHCPv6? ULAs (fd00::) and link-local
+    (fe80::) don't count."""
+    out, _, _ = run(['ip', '-6', 'addr', 'show', 'dev', iface, 'scope', 'global'])
+    for m in re.finditer(r'inet6\s+([0-9a-fA-F:]+)/\d+', out):
+        try:
+            ip = ipaddress.IPv6Address(m.group(1))
+            if ip.is_global:
+                return str(ip)
+        except (ValueError, ipaddress.AddressValueError):
+            continue
+    return None
+
+def detect_iface_ipv6(iface, active=False):
+    """Per-interface IPv6 capability.
+      has_global : router on this NIC provides a public IPv6 address
+      addr       : that address (or None)
+      internet   : (only if active=True) IPv6 internet actually reachable
+                   through this NIC — runs a real curl bound to the iface.
+    The passive check is instant; the active check costs up to ~6s so it's
+    opt-in (used by the /api/ipv6/scan endpoint, not the fast status poll)."""
+    addr = iface_global_ipv6(iface)
+    result = {'has_global': addr is not None, 'addr': addr, 'internet': None}
+    if active and addr:
+        _, _, rc = run(['curl', '-6', '-s', '--interface', iface,
+                        '--max-time', '6', '-o', '/dev/null',
+                        'https://api64.ipify.org'])
+        result['internet'] = (rc == 0)
+    return result
+
 PROXY_PORT_RANGE = os.environ.get('PROXYMANAGER_PORT_RANGE', '10001:11000')
 
 def manage_ipv6_firewall(enable):
@@ -923,6 +955,26 @@ def api_ipv6_get():
         'enabled':     bool(cfg.get('ipv6_ingress')),
         'public_ipv6': get_public_ipv6(),
         'port_range':  PROXY_PORT_RANGE,
+    })
+
+@app.route('/api/ipv6/scan', methods=['POST'])
+def api_ipv6_scan():
+    """Active per-interface IPv6 capability scan. For each physical NIC,
+    reports whether its router provides a public IPv6 AND whether IPv6
+    internet is actually reachable through it (real curl bound to the NIC).
+    Runs the active checks in parallel to keep total time low."""
+    ifaces = list_nics()
+    results = {}
+    def _check(i):
+        return i, detect_iface_ipv6(i, active=True)
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(ifaces)))) as pool:
+        for i, res in pool.map(_check, ifaces):
+            results[i] = res
+    any_internet = [i for i, r in results.items() if r.get('internet')]
+    return jsonify({
+        'results': results,
+        'ipv6_internet_ifaces': any_internet,
+        'public_ipv6': get_public_ipv6(),
     })
 
 @app.route('/api/ipv6', methods=['POST'])
@@ -966,6 +1018,9 @@ def api_status():
         data['wireless']   = is_wireless(iface)
         if data['wireless']:
             data['wifi_ssid'] = get_wifi_ssid(iface)
+        # Passive per-router IPv6 check (instant — just reads addresses)
+        data['ipv6_addr']    = iface_global_ipv6(iface)
+        data['ipv6_capable'] = data['ipv6_addr'] is not None
         # Suggested {ip, prefix, gateway} for the Configure modal to auto-fill.
         # Uses derive_live_config() which falls back to .1 of the subnet when
         # no default-route gateway is currently bound to the iface.

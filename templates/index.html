@@ -80,6 +80,10 @@
         <button class="btn btn-sm btn-success" onclick="autoConfigureAll()" title="Detect every connected NIC and configure it from its live IP/gateway">
           <i class="bi bi-magic me-1"></i>Auto-Configure All
         </button>
+        <button class="btn btn-sm" style="background:#6e40c9;color:#fff;" onclick="scanIpv6()" title="Test which routers provide working IPv6 internet">
+          <span id="ipv6ScanSpinner" class="spinner-border spinner-border-sm me-1 d-none"></span>
+          <i class="bi bi-globe2 me-1"></i>Scan IPv6
+        </button>
         <button class="btn btn-sm btn-outline-secondary" onclick="loadStatus()"><i class="bi bi-arrow-clockwise me-1"></i>Refresh</button>
       </div>
     </div>
@@ -312,6 +316,50 @@ async function loadStatus() {
   renderIfaces(ifaceData);
 }
 
+// Per-interface active IPv6 scan results: iface -> {has_global, addr, internet}
+let ipv6ScanResults = {};
+
+function ipv6Badge(d) {
+  if (!d.ipv6_capable) return '';
+  // After an active scan we know if internet actually works through it
+  const scan = ipv6ScanResults[d.name];
+  if (scan && scan.internet === true)
+    return '<span class="badge badge-iface" style="background:#2ea043;" title="Public IPv6 + internet verified">IPv6 ✓</span>';
+  if (scan && scan.internet === false)
+    return '<span class="badge badge-iface" style="background:#bb8009;" title="Has public IPv6 but internet test failed">IPv6 ?</span>';
+  return '<span class="badge badge-iface" style="background:#6e40c9;" title="Router provides a public IPv6 address">IPv6</span>';
+}
+
+function ipv6InternetTag(iface) {
+  const scan = ipv6ScanResults[iface];
+  if (!scan || scan.internet == null) return '';
+  return scan.internet
+    ? ' <span class="text-success small">(internet ✓)</span>'
+    : ' <span class="text-warning small">(no internet)</span>';
+}
+
+async function scanIpv6() {
+  const sp = document.getElementById('ipv6ScanSpinner');
+  sp.classList.remove('d-none');
+  try {
+    const res = await fetch('/api/ipv6/scan', {method: 'POST'});
+    const r = await res.json();
+    ipv6ScanResults = r.results || {};
+    const ok = r.ipv6_internet_ifaces || [];
+    if (ok.length) {
+      toast(`IPv6 internet works on: ${ok.join(', ')}`, 'success');
+    } else {
+      const hasAddr = Object.values(ipv6ScanResults).filter(x => x.has_global).length;
+      toast(hasAddr ? 'Public IPv6 addresses found, but none reach the IPv6 internet' : 'No router provides public IPv6', 'warning');
+    }
+    renderIfaces(ifaceData);
+  } catch (e) {
+    toast('IPv6 scan failed: ' + (e.message || e), 'danger');
+  } finally {
+    sp.classList.add('d-none');
+  }
+}
+
 function renderIfaces(data) {
   const grid = document.getElementById('ifaceGrid');
   grid.innerHTML = '';
@@ -350,10 +398,12 @@ function renderIfaces(data) {
                 ${isUplink ? '<span class="badge bg-info badge-iface" title="Holds the main default route — Tailscale uses this">Uplink</span>' : ''}
               </div>
               ${d.wireless ? '<span class="badge bg-warning text-dark badge-iface" title="Wireless interface"><i class="bi bi-wifi"></i></span>' : ''}
+              ${ipv6Badge(d)}
               <span class="badge bg-${badge} badge-iface">${status}</span>
             </div>
             <div class="small text-muted mb-1"><i class="bi bi-${d.wireless ? 'wifi' : 'ethernet'} me-1"></i>${ip ? ip + '/' + (d.cfg?.prefix || d.prefix || 24) : '—'}</div>
             <div class="small text-muted mb-1"><i class="bi bi-arrow-right me-1"></i>GW: ${d.cfg?.gateway || '—'}</div>
+            ${d.ipv6_addr ? `<div class="small text-muted mb-1"><i class="bi bi-globe2 me-1" style="color:#a371f7;"></i>IPv6: <code style="color:#a371f7;">${d.ipv6_addr}</code>${ipv6InternetTag(iface)}</div>` : ''}
             ${d.wireless && d.wifi_ssid ? `<div class="small text-muted mb-1"><i class="bi bi-broadcast me-1"></i>SSID: <span class="text-info">${d.wifi_ssid}</span></div>` : ''}
             <div class="small mb-3"><i class="bi bi-shield-lock me-1 text-primary"></i><span class="text-white">${count}</span> <span class="text-muted">proxy account${count !== 1 ? 's' : ''}</span></div>
             <div class="d-flex gap-2 flex-wrap">
