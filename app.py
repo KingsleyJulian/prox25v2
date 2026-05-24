@@ -456,11 +456,20 @@ def apply_policy_routing(iface, ip, gateway, t):
 # ── 3proxy config ─────────────────────────────────────────────────────────────
 
 def write_3proxy(proxies):
+    cfg = load_cfg()
+    # Dual-stack ingress: when IPv6 ingress is enabled, listen on :: which (with
+    # Linux's default net.ipv6.bindv6only=0) accepts BOTH IPv6 and IPv4 clients
+    # — so Tailscale/LAN IPv4 keeps working AND public IPv6 is added. Egress
+    # (-e<ipv4>) is unchanged; proxies still exit via their ISP NIC.
+    listen = '::' if cfg.get('ipv6_ingress') else '0.0.0.0'
     lines = [
         'nserver 8.8.8.8',
         'nserver 8.8.4.4',
         'nscache 65536',
         'timeouts 1 5 30 60 180 1800 15 60',
+        # logformat chosen so the fail2ban filter can match: client IP + error
+        # code. %C = client IP, %U = username, %E = errno (0 = ok).
+        'logformat "L%C %U %E"',
         'log /var/log/3proxy/3proxy.log D',
         'maxconn 200',
         '',
@@ -473,7 +482,7 @@ def write_3proxy(proxies):
         lines += [
             f"# {p['interface']} | {p['username']}",
             'allow *',
-            f"socks -p{p['port']} -i0.0.0.0 -e{p['exit_ip']} -a",
+            f"socks -p{p['port']} -i{listen} -e{p['exit_ip']} -a",
             '',
         ]
     os.makedirs(os.path.dirname(PROXY3_CFG), exist_ok=True)
@@ -862,9 +871,84 @@ def get_tailscale_ip():
     m = re.search(r'inet (\d+\.\d+\.\d+\.\d+)', out)
     return m.group(1) if m else None
 
+def get_public_ipv6():
+    """First globally-routable IPv6 (2000::/3) on any NIC, or None.
+    Excludes link-local (fe80::) and ULA (fc00::/7) which aren't reachable
+    from the internet."""
+    out, _, _ = run(['ip', '-6', 'addr', 'show', 'scope', 'global'])
+    for m in re.finditer(r'inet6\s+([0-9a-fA-F:]+)/\d+', out):
+        try:
+            ip = ipaddress.IPv6Address(m.group(1))
+            if ip.is_global:
+                return str(ip)
+        except (ValueError, ipaddress.AddressValueError):
+            continue
+    return None
+
+PROXY_PORT_RANGE = os.environ.get('PROXYMANAGER_PORT_RANGE', '10001:11000')
+
+def manage_ipv6_firewall(enable):
+    """Open/close the proxy port range for IPv6 in UFW. No-op if UFW isn't
+    installed or active. Returns (ok, message)."""
+    # Is UFW present and active?
+    out, _, rc = run(['ufw', 'status'])
+    if rc != 0:
+        return False, 'ufw not installed/available'
+    active = 'Status: active' in out
+    rule = [PROXY_PORT_RANGE + '/tcp']
+    if enable:
+        # UFW with IPV6=yes (Ubuntu default) applies this to both v4 and v6.
+        _, err, rc = run(['ufw', 'allow', PROXY_PORT_RANGE + '/tcp',
+                          'comment', 'proxymanager proxy ports'])
+        msg = 'opened' if rc == 0 else f'ufw allow failed: {err}'
+        return rc == 0, msg if active else 'rule added (ufw inactive — enable with: sudo ufw enable)'
+    else:
+        run(['ufw', 'delete', 'allow', PROXY_PORT_RANGE + '/tcp'])
+        return True, 'closed'
+
 @app.route('/api/server-info')
 def api_server_info():
-    return jsonify({'tailscale_ip': get_tailscale_ip()})
+    cfg = load_cfg()
+    return jsonify({
+        'tailscale_ip':  get_tailscale_ip(),
+        'public_ipv6':   get_public_ipv6(),
+        'ipv6_ingress':  bool(cfg.get('ipv6_ingress')),
+        'port_range':    PROXY_PORT_RANGE,
+    })
+
+@app.route('/api/ipv6', methods=['GET'])
+def api_ipv6_get():
+    cfg = load_cfg()
+    return jsonify({
+        'enabled':     bool(cfg.get('ipv6_ingress')),
+        'public_ipv6': get_public_ipv6(),
+        'port_range':  PROXY_PORT_RANGE,
+    })
+
+@app.route('/api/ipv6', methods=['POST'])
+def api_ipv6_set():
+    """Toggle IPv6 ingress: flips 3proxy listen address to ::, manages the
+    UFW rule, and reloads 3proxy."""
+    d = request.json or {}
+    enable = bool(d.get('enabled'))
+    cfg = load_cfg()
+    cfg['ipv6_ingress'] = enable
+    save_cfg(cfg)
+    # Ensure dual-stack accept (default on Linux, but enforce it)
+    run(['sysctl', '-w', 'net.ipv6.bindv6only=0'])
+    fw_ok, fw_msg = manage_ipv6_firewall(enable)
+    write_3proxy(cfg['proxies'])
+    reload_3proxy()
+    pub = get_public_ipv6()
+    return jsonify({
+        'success':      True,
+        'enabled':      enable,
+        'public_ipv6':  pub,
+        'firewall':     fw_msg,
+        'warning':      None if (not enable or pub) else
+                        'IPv6 ingress enabled but no public IPv6 detected — '
+                        'your ISP may not provide routable IPv6.',
+    })
 
 @app.route('/api/status')
 def api_status():
@@ -1463,6 +1547,14 @@ if __name__ == '__main__':
         _t = _icfg.get('table_id') or get_or_assign_tid(_iface, _cfg)
         apply_policy_routing(_iface, _icfg['ip'], _icfg['gateway'], _t)
     save_cfg(_cfg)
+    # Restore IPv6 ingress state (firewall rule + dual-stack sysctl) if it was
+    # enabled before a restart/reboot.
+    if _cfg.get('ipv6_ingress'):
+        run(['sysctl', '-w', 'net.ipv6.bindv6only=0'])
+        try:
+            manage_ipv6_firewall(True)
+        except Exception as _e:
+            print(f'[startup] ipv6 firewall: {_e}', file=sys.stderr, flush=True)
     if _cfg.get('proxies'):
         write_3proxy(_cfg['proxies'])
         reload_3proxy()

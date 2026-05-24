@@ -9,7 +9,7 @@ apt-get update -qq 2>/dev/null || apt-get update --fix-missing -qq || true
 # Python deps + 3proxy build deps + WiFi tooling
 # (libssl-dev for 3proxy authradius; iw + wpasupplicant for wlo*/wlp* NICs)
 apt-get install -y python3 python3-pip python3-venv build-essential git \
-                   libssl-dev iw wpasupplicant
+                   libssl-dev iw wpasupplicant fail2ban
 
 # Create venv (Ubuntu 24.04 forbids system-wide pip per PEP 668)
 mkdir -p /opt/proxymanager
@@ -112,6 +112,39 @@ EOF
 udevadm control --reload-rules
 # Trigger the rule for already-present devices (so existing DOWN NICs come up now)
 udevadm trigger --subsystem-match=net --action=add
+
+# Dual-stack: IPv6 sockets accept IPv4 too (needed for the '-i::' listen mode
+# used when IPv6 ingress is enabled). This is Linux's default but enforce it.
+cat > /etc/sysctl.d/99-proxymanager-ipv6.conf << 'EOF'
+net.ipv6.bindv6only = 0
+EOF
+sysctl --system >/dev/null 2>&1 || true
+
+# fail2ban jail for 3proxy — bans IPs after repeated failed SOCKS auth.
+# Matches the logformat written by write_3proxy(): "L<client-ip> <user> <errno>"
+# where a non-zero errno on the auth line indicates a rejected/failed attempt.
+cat > /etc/fail2ban/filter.d/3proxy.conf << 'EOF'
+[Definition]
+# Lines look like:  L<host> <user> <errno>
+# errno 0 = success; anything else on a connection attempt = failure/denied.
+failregex = ^L<HOST> \S* [1-9]\d*\s*$
+            ^L<HOST> - [1-9]\d*\s*$
+ignoreregex =
+EOF
+
+cat > /etc/fail2ban/jail.d/3proxy.conf << 'EOF'
+[3proxy]
+enabled  = true
+port     = 10001:11000
+filter   = 3proxy
+logpath  = /var/log/3proxy/3proxy.log*
+maxretry = 5
+findtime = 600
+bantime  = 3600
+EOF
+
+systemctl enable fail2ban >/dev/null 2>&1 || true
+systemctl restart fail2ban >/dev/null 2>&1 || true
 
 systemctl daemon-reload
 systemctl enable proxymanager 3proxy

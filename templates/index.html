@@ -43,6 +43,26 @@
     </div>
   </div>
 
+  <!-- IPv6 ingress -->
+  <div class="alert mb-3 d-flex align-items-center gap-2" style="background:#1c2128; border:1px solid #6e40c9; color:#e6edf3;">
+    <i class="bi bi-globe2 fs-5" style="color:#a371f7;"></i>
+    <div class="flex-grow-1">
+      <div class="d-flex align-items-center gap-2">
+        <strong>IPv6 Ingress:</strong>
+        <div class="form-check form-switch mb-0">
+          <input class="form-check-input" type="checkbox" id="ipv6Toggle" onchange="toggleIpv6(this.checked)" style="cursor:pointer;">
+        </div>
+        <span id="ipv6State" class="small text-muted">disabled</span>
+      </div>
+      <div id="ipv6Detail" class="small text-muted mt-1">
+        When enabled, proxies also listen on your public IPv6 so you can connect without Tailscale.
+      </div>
+    </div>
+  </div>
+
+  <!-- Tailscale reminder -->
+  <!-- (moved below; keep original id) -->
+
   <!-- Tabs -->
   <ul class="nav nav-tabs mb-3" id="mainTabs">
     <li class="nav-item"><a class="nav-link active" href="#" onclick="switchTab('interfaces',this)"><i class="bi bi-ethernet me-1"></i>Interfaces</a></li>
@@ -741,15 +761,62 @@ function copyStr(s) {
 loadStatus();
 setInterval(loadStatus, 15000);
 
-// Show Tailscale banner
-(async () => {
+// Show Tailscale banner + IPv6 ingress state
+let _serverInfo = {};
+async function loadServerInfo() {
   const res = await fetch('/api/server-info');
   const info = await res.json();
+  _serverInfo = info;
   if (info.tailscale_ip) {
     document.getElementById('tailscaleIp').textContent = info.tailscale_ip;
     document.getElementById('tailscaleBanner').style.display = 'flex';
   }
-})();
+  renderIpv6(info);
+}
+
+function renderIpv6(info) {
+  const toggle = document.getElementById('ipv6Toggle');
+  const state  = document.getElementById('ipv6State');
+  const detail = document.getElementById('ipv6Detail');
+  toggle.checked = !!info.ipv6_ingress;
+  if (info.ipv6_ingress) {
+    state.textContent = 'enabled';
+    state.className = 'small text-success';
+    if (info.public_ipv6) {
+      detail.innerHTML = `Connect from anywhere using <code class="text-info">[${info.public_ipv6}]</code> as the <strong>Host</strong> and the proxy port (e.g. <code>[${info.public_ipv6}]:10001</code>). Tailscale/LAN still work too.`;
+    } else {
+      detail.innerHTML = '<span class="text-warning"><i class="bi bi-exclamation-triangle me-1"></i>Enabled, but no public IPv6 detected on this server — your ISP may not provide routable IPv6.</span>';
+    }
+  } else {
+    state.textContent = 'disabled';
+    state.className = 'small text-muted';
+    detail.innerHTML = info.public_ipv6
+      ? `Detected public IPv6: <code class="text-muted">${info.public_ipv6}</code>. Toggle on to listen on it (port range ${info.port_range || '10001:11000'}).`
+      : 'When enabled, proxies also listen on your public IPv6 so you can connect without Tailscale. <span class="text-muted">(No public IPv6 detected yet.)</span>';
+  }
+}
+
+async function toggleIpv6(enabled) {
+  const detail = document.getElementById('ipv6Detail');
+  detail.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Applying…';
+  try {
+    const res = await fetch('/api/ipv6', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({enabled}),
+    });
+    const r = await res.json();
+    _serverInfo = {..._serverInfo, ipv6_ingress: r.enabled, public_ipv6: r.public_ipv6};
+    renderIpv6(_serverInfo);
+    if (r.warning) toast(r.warning, 'warning');
+    else toast(enabled ? `IPv6 ingress on (firewall: ${r.firewall})` : 'IPv6 ingress off');
+  } catch (e) {
+    toast('Failed: ' + (e.message || e), 'danger');
+    loadServerInfo();
+  }
+}
+
+loadServerInfo();
 </script>
 </body>
 </html>
