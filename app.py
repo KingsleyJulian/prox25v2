@@ -187,10 +187,27 @@ def get_iface_status():
                     'ip': ip_m.group(1),
                     'prefix': int(ip_m.group(2)),
                 })
+            ip6_m = re.search(r'inet6 ([0-9a-fA-F:]+)/(\d+)', line)
+            if ip6_m:
+                addr = ip6_m.group(1)
+                try:
+                    a = ipaddress.IPv6Address(addr)
+                    if a.is_link_local:
+                        kind = 'link-local'      # fe80:: — not routable, skip in UI
+                    elif a.is_global:
+                        kind = 'global'          # 2000::/3 — internet-routable
+                    else:
+                        kind = 'local'           # ULA fd00:: — LAN-only
+                except (ValueError, ipaddress.AddressValueError):
+                    continue
+                result[cur].setdefault('ipv6_list', []).append({
+                    'addr': addr, 'prefix': int(ip6_m.group(2)), 'kind': kind,
+                })
     gws = get_default_gateways()
     for iface, data in result.items():
         data['gateway'] = gws.get(iface)
         data['ip'], data['prefix'] = _pick_best_address(data['addresses'], data['gateway'])
+        data.setdefault('ipv6_list', [])
     return result
 
 def derive_live_config(iface):
