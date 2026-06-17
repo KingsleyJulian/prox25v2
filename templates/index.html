@@ -84,6 +84,9 @@
           <span id="ipv6ScanSpinner" class="spinner-border spinner-border-sm me-1 d-none"></span>
           <i class="bi bi-globe2 me-1"></i>Scan IPv6
         </button>
+        <button class="btn btn-sm btn-outline-info" onclick="openVlanModal()" title="Create an 802.1Q VLAN sub-interface on a trunk port">
+          <i class="bi bi-diagram-3 me-1"></i>Add VLAN
+        </button>
         <button class="btn btn-sm btn-outline-secondary" onclick="loadStatus()"><i class="bi bi-arrow-clockwise me-1"></i>Refresh</button>
       </div>
     </div>
@@ -389,11 +392,14 @@ function renderIfaces(data) {
     grid.innerHTML = '<div class="col-12 text-muted text-center py-4">No physical interfaces detected</div>';
     return;
   }
-  // Refresh filter dropdown to match detected ifaces
+  // Refresh filter dropdown to match detected ifaces (show label if set)
   const filterSel = document.getElementById('filterIface');
   const cur = filterSel.value;
   filterSel.innerHTML = '<option value="">All interfaces</option>' +
-    ifaces.map(i => `<option value="${i}">${i}</option>`).join('');
+    ifaces.map(i => {
+      const lbl = data[i]?.label;
+      return `<option value="${i}">${lbl ? escapeHtml(lbl) + ' (' + i + ')' : i}</option>`;
+    }).join('');
   filterSel.value = cur;
 
   ifaces.forEach(iface => {
@@ -408,15 +414,19 @@ function renderIfaces(data) {
     let badge    = !connected ? 'secondary' : !configured ? 'warning' : 'success';
     let status   = !connected ? 'No Carrier' : !configured ? 'Not Configured' : 'Active';
 
+    const titleHtml = d.label
+      ? `<h6 class="mb-0 text-white">${escapeHtml(d.label)}</h6><div class="text-muted" style="font-size:.7rem;font-family:monospace;">${iface}</div>`
+      : `<h6 class="mb-0 text-white">${iface}</h6>`;
     grid.innerHTML += `
       <div class="col-xl-4 col-md-6">
         <div class="card iface-card h-100">
           <div class="card-body">
             <div class="d-flex justify-content-between align-items-start mb-2">
-              <div class="d-flex align-items-center gap-2">
-                <span class="dot" style="background:${dotColor}; margin-top:2px;"></span>
-                <h6 class="mb-0 text-white">${iface}</h6>
+              <div class="d-flex align-items-center gap-2 flex-wrap">
+                <span class="dot" style="background:${dotColor}; margin-top:6px;"></span>
+                <div>${titleHtml}</div>
                 ${isUplink ? '<span class="badge bg-info badge-iface" title="Holds the main default route — Tailscale uses this">Uplink</span>' : ''}
+                ${d.is_vlan ? `<span class="badge badge-iface" style="background:#388bfd;" title="802.1Q VLAN ${d.vlan_id} on ${d.vlan_parent}">VLAN ${d.vlan_id}</span>` : ''}
               </div>
               ${d.wireless ? '<span class="badge bg-warning text-dark badge-iface" title="Wireless interface"><i class="bi bi-wifi"></i></span>' : ''}
               ${ipv6Badge(d)}
@@ -432,14 +442,74 @@ function renderIfaces(data) {
               <button class="btn btn-sm btn-primary flex-fill" onclick="openIfaceModal('${iface}')">
                 <i class="bi bi-gear me-1"></i>${configured ? 'Edit' : 'Configure'}
               </button>
+              <button class="btn btn-sm btn-outline-secondary" onclick="renameIface('${iface}')" title="Rename (label)"><i class="bi bi-pencil"></i></button>
               ${connected ? `<button class="btn btn-sm btn-outline-success" onclick="autoConfigureOne('${iface}')" title="Auto-configure from live state"><i class="bi bi-magic"></i></button>` : ''}
               ${configured ? `<button class="btn btn-sm btn-outline-primary" onclick="quickAddProxy('${iface}')"><i class="bi bi-plus-lg"></i></button>` : ''}
               ${configured ? `<button class="btn btn-sm btn-outline-danger" onclick="removeIface('${iface}')"><i class="bi bi-trash"></i></button>` : ''}
+              ${d.is_vlan ? `<button class="btn btn-sm btn-outline-danger" onclick="deleteVlan('${iface}')" title="Remove VLAN sub-interface"><i class="bi bi-diagram-3"></i><i class="bi bi-trash"></i></button>` : ''}
             </div>
           </div>
         </div>
       </div>`;
   });
+}
+
+// ── Rename (label) ──
+async function renameIface(iface) {
+  const cur = ifaceData[iface]?.label || '';
+  const lbl = prompt(`Display label for ${iface}\n(leave blank to clear)`, cur);
+  if (lbl === null) return;
+  const opts = lbl.trim()
+    ? {method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({label: lbl.trim()})}
+    : {method: 'DELETE'};
+  const res = await fetch(`/api/interface/${iface}/label`, opts);
+  const r = await res.json();
+  if (r.success) {
+    toast(lbl.trim() ? `Labelled "${lbl.trim()}"` : 'Label cleared');
+    loadStatus();
+  } else {
+    toast('Rename failed', 'danger');
+  }
+}
+
+// ── VLAN ──
+async function openVlanModal() {
+  const status = ifaceData;
+  // Only physical (non-VLAN) NICs can be a trunk parent
+  const parents = Object.keys(status).filter(i => !status[i].is_vlan).sort();
+  if (!parents.length) { toast('No physical NICs to use as VLAN parent', 'warning'); return; }
+  const parent = prompt(`Trunk (parent) NIC for the new VLAN.\nAvailable: ${parents.join(', ')}`, parents[0]);
+  if (!parent) return;
+  if (!parents.includes(parent)) { toast(`${parent} is not a valid parent NIC`, 'danger'); return; }
+  const vidStr = prompt(`VLAN ID (1–4094) on ${parent}:`, '10');
+  if (!vidStr) return;
+  const vid = parseInt(vidStr, 10);
+  if (isNaN(vid) || vid < 1 || vid > 4094) { toast('VLAN ID must be 1–4094', 'danger'); return; }
+  toast(`Creating ${parent}.${vid}…`);
+  const res = await fetch('/api/vlan', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({parent, vlan_id: vid}),
+  });
+  const r = await res.json();
+  if (r.success) {
+    toast(`${r.iface} created — waiting for DHCP…`);
+    setTimeout(loadStatus, 2000);
+  } else {
+    toast(r.error || 'VLAN create failed', 'danger');
+  }
+}
+
+async function deleteVlan(iface) {
+  if (!confirm(`Tear down VLAN ${iface}? This removes its proxies and netplan entry.`)) return;
+  const res = await fetch(`/api/vlan/${iface}`, {method: 'DELETE'});
+  const r = await res.json();
+  if (r.success) {
+    toast(`${iface} removed`, 'warning');
+    loadStatus();
+  } else {
+    toast(r.error || 'Delete failed', 'danger');
+  }
 }
 
 // ── WiFi ──
@@ -702,8 +772,12 @@ function renderProxies(list) {
   }
   tbody.innerHTML = list.map(p => {
     const conn = `${p.exit_ip}:${p.port}:${p.username}:${p.password}`;
+    const ifaceLabel = ifaceData[p.interface]?.label;
+    const ifaceCell = ifaceLabel
+      ? `<div class="text-white small">${escapeHtml(ifaceLabel)}</div><code class="small text-muted">${p.interface}</code>`
+      : `<code class="small">${p.interface}</code>`;
     return `<tr>
-      <td class="ps-3"><code class="small">${p.interface}</code></td>
+      <td class="ps-3">${ifaceCell}</td>
       <td><code class="small">${p.exit_ip}</code></td>
       <td><code>${p.port}</code></td>
       <td><code>${p.username}</code></td>

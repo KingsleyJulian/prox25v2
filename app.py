@@ -48,16 +48,37 @@ def run(cmd):
     r = subprocess.run(cmd, capture_output=True, text=True)
     return r.stdout.strip(), r.stderr.strip(), r.returncode
 
-def list_nics():
-    """Physical interfaces — anything in /sys/class/net with a backing device.
-    Includes both ethernet (enp*/enx*/eno*) and wireless (wl*) NICs."""
+def list_vlans():
+    """Map vlan_iface -> {parent, id} from /proc/net/vlan/config.
+    These are 802.1Q sub-interfaces (e.g. enp1s0.10) created on a trunk port."""
+    vlans = {}
     try:
-        return sorted(
-            i for i in os.listdir(SYS_NET)
-            if os.path.exists(f'{SYS_NET}/{i}/device')
-        )
+        with open('/proc/net/vlan/config') as f:
+            for line in f:
+                parts = [p.strip() for p in line.split('|')]
+                # data lines: "enp1s0.10 | 10 | enp1s0"
+                if len(parts) == 3 and parts[1].isdigit():
+                    vlans[parts[0]] = {'parent': parts[2], 'id': int(parts[1])}
     except FileNotFoundError:
-        return []
+        pass
+    return vlans
+
+def is_vlan(iface):
+    return iface in list_vlans()
+
+def list_nics():
+    """Physical NICs (anything in /sys/class/net with a backing device:
+    ethernet enp*/enx*/eno*, wireless wl*) PLUS 802.1Q VLAN sub-interfaces
+    on a trunk port (e.g. enp1s0.10)."""
+    nics = set()
+    try:
+        for i in os.listdir(SYS_NET):
+            if os.path.exists(f'{SYS_NET}/{i}/device'):
+                nics.add(i)
+    except FileNotFoundError:
+        pass
+    nics.update(list_vlans().keys())
+    return sorted(nics)
 
 def is_wireless(iface):
     """True if the interface is a WiFi adapter (has /sys/class/net/<iface>/wireless or phy80211)."""
@@ -387,19 +408,24 @@ def _netplan_apply(timeout=30):
         return False, 'netplan command not found'
 
 def update_netplan(iface, ip, prefix, gateway, t):
-    """Write the iface's static config to netplan under the right section.
-    Wireless ifaces go under `wifis:` (preserving any existing access-points
-    so the AP association doesn't get wiped). Ethernet ifaces go under
-    `ethernets:`."""
+    """Write the iface's static config to netplan under the right section:
+    `vlans:` for 802.1Q sub-interfaces (preserving id/link), `wifis:` for
+    wireless (preserving access-points), else `ethernets:`."""
     cfg = _load_netplan()
     net = str(ipaddress.IPv4Network(f'{ip}/{prefix}', strict=False))
-    section = 'wifis' if is_wireless(iface) else 'ethernets'
+    vlans = list_vlans()
+    if iface in vlans:
+        section = 'vlans'
+    elif is_wireless(iface):
+        section = 'wifis'
+    else:
+        section = 'ethernets'
     cfg['network'].setdefault(section, {})
 
-    # If a wireless iface already has an access-points block from the WiFi
-    # connect flow, preserve it — otherwise the iface drops its WiFi.
     existing = cfg['network'][section].get(iface, {})
-    access_points = existing.get('access-points')
+    access_points = existing.get('access-points')          # wifi only
+    vlan_id   = existing.get('id')   or vlans.get(iface, {}).get('id')
+    vlan_link = existing.get('link') or vlans.get(iface, {}).get('parent')
 
     iface_block = {
         'addresses': [f'{ip}/{prefix}'],
@@ -412,14 +438,17 @@ def update_netplan(iface, ip, prefix, gateway, t):
     }
     if section == 'wifis' and access_points:
         iface_block['access-points'] = access_points
+    if section == 'vlans':
+        iface_block['id'] = vlan_id
+        iface_block['link'] = vlan_link
 
     cfg['network'][section][iface] = iface_block
-    # Make sure the iface isn't also lingering in the wrong section
-    other = 'ethernets' if section == 'wifis' else 'wifis'
-    if iface in cfg['network'].get(other, {}):
-        del cfg['network'][other][iface]
-        if not cfg['network'][other]:
-            del cfg['network'][other]
+    # Make sure the iface isn't lingering in a different section
+    for other in ('ethernets', 'wifis', 'vlans'):
+        if other != section and iface in cfg['network'].get(other, {}):
+            del cfg['network'][other][iface]
+            if not cfg['network'][other]:
+                del cfg['network'][other]
 
     _write_netplan(cfg)
     return _netplan_apply()
@@ -443,7 +472,6 @@ def remove_from_netplan(iface):
         wifi_block = cfg['network']['wifis'][iface]
         access_points = wifi_block.get('access-points')
         if access_points:
-            # Keep just the WiFi association, strip the rest
             cfg['network']['wifis'][iface] = {
                 'dhcp4': True,
                 'access-points': access_points,
@@ -452,6 +480,18 @@ def remove_from_netplan(iface):
             del cfg['network']['wifis'][iface]
             if not cfg['network']['wifis']:
                 del cfg['network']['wifis']
+        changed = True
+
+    if iface in cfg['network'].get('vlans', {}):
+        # Preserve VLAN id/link but strip the proxy IP/routes; default to DHCP
+        vblock = cfg['network']['vlans'][iface]
+        vid, vlink = vblock.get('id'), vblock.get('link')
+        if vid is not None and vlink:
+            cfg['network']['vlans'][iface] = {'id': vid, 'link': vlink, 'dhcp4': True}
+        else:
+            del cfg['network']['vlans'][iface]
+            if not cfg['network']['vlans']:
+                del cfg['network']['vlans']
         changed = True
 
     if changed:
@@ -994,6 +1034,92 @@ def api_ipv6_scan():
         'public_ipv6': get_public_ipv6(),
     })
 
+# ── Interface labels (UI-only display names) ──────────────────────────────────
+
+@app.route('/api/interface/<iface>/label', methods=['POST', 'DELETE'])
+def api_iface_label(iface):
+    """Set or clear a human-readable label for an interface. Affects display
+    only — does NOT rename the kernel interface, so policy routing, 3proxy
+    bindings, and config keys keep using the real iface name."""
+    cfg = load_cfg()
+    labels = cfg.setdefault('labels', {})
+    if request.method == 'DELETE':
+        labels.pop(iface, None)
+    else:
+        d = request.json or {}
+        label = (d.get('label') or '').strip()[:60]
+        if label:
+            labels[iface] = label
+        else:
+            labels.pop(iface, None)
+    save_cfg(cfg)
+    return jsonify({'success': True, 'label': labels.get(iface)})
+
+# ── VLAN sub-interfaces (802.1Q trunk) ────────────────────────────────────────
+
+@app.route('/api/vlan', methods=['POST'])
+def api_vlan_create():
+    """Create an 802.1Q VLAN sub-interface on a trunk NIC.
+    Body: {parent: 'enp1s0', vlan_id: 10}. Writes a vlans: block, brings the
+    parent up (no IP — only carries tagged frames), VLAN defaults to DHCP so
+    the ISP on that VLAN can lease it an address. Once up it shows up as a
+    normal configurable interface (enp1s0.10) everywhere else."""
+    d = request.json or {}
+    parent = d.get('parent')
+    try:
+        vid = int(d.get('vlan_id'))
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'error': 'vlan_id must be a number'}), 400
+    if not (1 <= vid <= 4094):
+        return jsonify({'success': False, 'error': 'vlan_id must be 1–4094'}), 400
+    if parent not in list_nics() or is_vlan(parent):
+        return jsonify({'success': False, 'error': 'parent must be a physical NIC'}), 400
+    name = f'{parent}.{vid}'
+    if name in list_vlans():
+        return jsonify({'success': False, 'error': f'{name} already exists'}), 400
+
+    cfg = _load_netplan()
+    cfg['network'].setdefault('ethernets', {})
+    pdef = cfg['network']['ethernets'].get(parent, {})
+    pdef.setdefault('dhcp4', False)
+    pdef.setdefault('dhcp6', False)
+    cfg['network']['ethernets'][parent] = pdef
+    cfg['network'].setdefault('vlans', {})
+    cfg['network']['vlans'][name] = {'id': vid, 'link': parent, 'dhcp4': True}
+    _write_netplan(cfg)
+    ok, err = _netplan_apply()
+
+    pcfg = load_cfg()
+    pcfg.setdefault('vlans', {})[name] = {'parent': parent, 'id': vid}
+    save_cfg(pcfg)
+    return jsonify({'success': ok, 'iface': name, 'error': err if not ok else None})
+
+@app.route('/api/vlan/<iface>', methods=['DELETE'])
+def api_vlan_delete(iface):
+    """Tear down a VLAN sub-interface: remove its proxies, its netplan block,
+    its policy routing, its config entry, and its label."""
+    pcfg = load_cfg()
+    icfg = pcfg.get('interfaces', {}).pop(iface, None)
+    if icfg and icfg.get('ip'):
+        run(['ip', 'rule', 'del', 'from', icfg['ip']])
+    pcfg['proxies'] = [p for p in pcfg.get('proxies', []) if p['interface'] != iface]
+    pcfg.get('vlans', {}).pop(iface, None)
+    pcfg.get('labels', {}).pop(iface, None)
+    save_cfg(pcfg)
+    cfg = _load_netplan()
+    if iface in cfg['network'].get('vlans', {}):
+        del cfg['network']['vlans'][iface]
+        if not cfg['network']['vlans']:
+            del cfg['network']['vlans']
+    for sect in ('ethernets', 'wifis'):
+        if iface in cfg['network'].get(sect, {}):
+            del cfg['network'][sect][iface]
+    _write_netplan(cfg)
+    _netplan_apply()
+    write_3proxy(pcfg['proxies'])
+    reload_3proxy()
+    return jsonify({'success': True})
+
 @app.route('/api/ipv6', methods=['POST'])
 def api_ipv6_set():
     """Toggle IPv6 ingress: flips 3proxy listen address to ::, manages the
@@ -1024,6 +1150,8 @@ def api_status():
     live   = get_iface_status()
     cfg    = load_cfg()
     uplink = get_uplink_iface()
+    _vlans_now = list_vlans()
+    labels = cfg.get('labels', {})
     counts = {}
     for p in cfg['proxies']:
         counts[p['interface']] = counts.get(p['interface'], 0) + 1
@@ -1032,6 +1160,11 @@ def api_status():
         data['cfg']        = cfg['interfaces'].get(iface)
         data['proxy_count']= counts.get(iface, 0)
         data['is_uplink']  = (iface == uplink)
+        data['label']      = labels.get(iface)
+        _v = _vlans_now.get(iface)
+        data['is_vlan']     = _v is not None
+        data['vlan_id']     = _v['id']     if _v else None
+        data['vlan_parent'] = _v['parent'] if _v else None
         data['wireless']   = is_wireless(iface)
         if data['wireless']:
             data['wifi_ssid'] = get_wifi_ssid(iface)
